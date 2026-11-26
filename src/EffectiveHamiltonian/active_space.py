@@ -35,9 +35,18 @@ Why permuting is safe
 A perturbative or CI treatment built on a canonical reference assumes a
 diagonal Fock matrix -- every denominator is a sum of orbital energies. A
 permutation of canonical MOs is still canonical: it only relabels, so the Fock
-matrix stays diagonal and eps stays exact. (ROTATING orbitals -- localizing,
-natural orbitals, anything mixing them -- would break that assumption and is
-NOT what this module does.)
+matrix stays diagonal and eps stays exact. Permutations are therefore the only
+thing the selection rules here do, and the indices stay canonical.
+
+A rotation enters only through `basis`
+--------------------------------------
+An `OrbitalBasis` (natural orbitals, say) is a rotation of the canonical MOs
+that mixes orbitals inside the occupied block and inside the virtual block,
+never across them. An ActiveSpace may carry one: its indices then number the
+orbitals of that basis, not the canonical ones, and the basis is part of its
+identity (equality, hash). With `basis=None` nothing changes: the indices are
+canonical, and the key, the equality and every result are those of a space
+without the field.
 """
 from dataclasses import dataclass
 from functools import cached_property
@@ -115,6 +124,7 @@ class ActiveSpace:
     nocc: int
     occ_active: np.ndarray
     virt_active: np.ndarray
+    basis: object = None   # an OrbitalBasis of this channel, or None: canonical
 
     def __post_init__(self):
         norb, nocc = int(self.norb), int(self.nocc)
@@ -127,7 +137,8 @@ class ActiveSpace:
 
     def _key(self):
         return (self.norb, self.nocc, tuple(self.occ_active.tolist()),
-                tuple(self.virt_active.tolist()))
+                tuple(self.virt_active.tolist()),
+                None if self.basis is None else self.basis.digest)
 
     def __eq__(self, other):
         if not isinstance(other, ActiveSpace):
@@ -149,9 +160,9 @@ class ActiveSpace:
                    np.arange(nocc, nocc + n_virt_active))
 
     @classmethod
-    def from_indices(cls, norb, nocc, occ_active, virt_active):
-        """The window spelt out: index arrays into the canonical orbital list."""
-        return cls(norb, nocc, occ_active, virt_active)
+    def from_indices(cls, norb, nocc, occ_active, virt_active, basis=None):
+        """The window spelt out: index arrays into the canonical orbital list, or into the orbitals of `basis` when it is given."""
+        return cls(norb, nocc, occ_active, virt_active, basis)
 
     @classmethod
     def from_irreps(cls, mol, mf, occ_irreps, vir_irreps):
