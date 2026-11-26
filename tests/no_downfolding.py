@@ -1,8 +1,10 @@
 """Mean fields and settings shared by the tests of the natural-orbital
-downfolding (tests/test_downfolding_no_*.py), and the brute-force checks of
+downfolding (tests/test_downfolding_no_*.py), the brute-force checks of
 their residual screening (`brute_force_vt`) and residual polarizability
-(`brute_force_pr`)."""
+(`brute_force_pr`), and the dense oracle of the RPA correlation energy of a
+hybridized active space (`dense_drpa_ec`)."""
 import numpy as np
+import scipy.linalg
 from pyscf import dft, scf
 from scipy.linalg import cho_factor, cho_solve
 
@@ -81,3 +83,13 @@ def brute_force_pr(b_ov, eps, nocc, T, space, g=2):
     active[np.ix_(space.occ_active, space.virt_active - nocc)] = True
     r = ~active.ravel()
     return -2.0 * g * b_rot[:, r] @ np.linalg.solve(lam[np.ix_(r, r)], b_rot[:, r].T)
+
+
+def dense_drpa_ec(delta, k, g=2):
+    """E_c of the direct RPA with A = diag(delta) + g k, B = g k (g = 2: one closed-shell
+    channel; g = 1: the pairs of both spins stacked), from the positive
+    eigenvalues of [[A, B], [-B, -A]]: (sum omega - tr A) / 2."""
+    a, b = np.diag(delta) + g * k, g * k
+    w = scipy.linalg.eig(np.block([[a, b], [-b, -a]]), right=False)
+    assert np.abs(w.imag).max() < 1e-10
+    return 0.5 * (np.sort(w.real)[len(delta):].sum() - np.trace(a))

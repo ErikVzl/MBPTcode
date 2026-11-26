@@ -5,15 +5,17 @@ known, on one of three routes: 'casida' (dense, every pole), 'imagfrequency'
 (density fitted, imaginary frequency, N^4) or 'space-time' (separable ISDF
 factors, imaginary time, N^3). `downfold` then gives the DownfoldingTerms of
 any active space from that one result: the screening correction vtilde, the
-correlation-energy pair and, with `sigma`, the static environment
-self-energy Sigma_bar^E.
+correlation-energy pair, on a rotated basis with Delta on the correlation
+energy of the hybridized active space, and, with `sigma`, the static
+environment self-energy Sigma_bar^E.
 
 After the constants and warnings, the file reads top-down: the low-level
 result with its two entry points (`RPALowLevel`, `run`, `downfold`), then the
 sections in the order `downfold` uses them, each opened by what holds on each
 route:
   1. the screening correction (vtilde)
-  2. the active correlation energy and the static defect
+  2. the active correlation energies (decoupled and hybridized) and the
+     static defect
   3. the environment self-energy Sigma^E
   4. the checks of Sigma^E
   5. the routes of `run`, with the shared W grid of the imaginary-axis
@@ -74,7 +76,8 @@ from src.SingleReference.GW.reaction_field import shift_after_solve
 from src.SingleReference.GW.self_energy import SigmaEvaluator
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.LinearResponse.casida import (CasidaInstability,
+                                                     CasidaSolver)
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
 from src.SingleReference.LinearResponse.linear_response import \
@@ -315,7 +318,7 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False,
 
 def downfold(low, active_space, screening='crpa', sigma=None,
              sigma_energies='mf', diagnostics=DIAGNOSTICS, numerics=None,
-             **opts):
+             hybridization=False, **opts):
     """The DownfoldingTerms of the RPA on the active space `active_space`.
 
     `active_space` is one ActiveSpace for a restricted low-level result, and
@@ -382,6 +385,12 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         number of them; `low` itself keeps its own. The layout may differ
         too; every other section has to equal the run's, which used it
         (NumericsMismatch otherwise, `RPALowLevel.settings`).
+    hybridization: False, or True from the general layer when it builds the
+        coupling of a rotated orbital basis (Delta on). Then, for an active
+        space with an orbital basis, e_c_hybridization = E_c^{A,Delta}[v_eff]
+        - E_c^A[v_eff] (`hybridized_correlation_energy`), the E_0 term of
+        the hybridized active space, on any reference; else 0.0, not
+        computed.
 
     E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
     pairs with v_eff = v + vtilde, v the same integrals as the full RPA
@@ -448,9 +457,14 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         # decides whether their numbers are kept
         recorded.update({name: value for name, value in checks.items()
                          if name in names})
+    e_c_hybridization = 0.0
+    if hybridization and rotated:
+        e_c_hybridization = (hybridized_correlation_energy(
+            low, active_space, v_eff) - e_c_active)
     return DownfoldingTerms(
         vtilde=vt, sigma_bar=sigma_bar, e_c_full=low.e_c_full,
-        e_c_active=e_c_active, dc=dc, diagnostics=recorded)
+        e_c_active=e_c_active, dc=dc, diagnostics=recorded,
+        e_c_hybridization=e_c_hybridization)
 
 
 def _refuse_qp_with_a_basis(sigma_energies):
@@ -670,7 +684,8 @@ def active_pair_projection(chan):
 
         E[(i,a),(t,u)] = O_ti U_ua,   O_ti = T[i, t],  U_ua = T[a, u],
 
-    T = chan.rotation (column k orbital k in the canonical MOs), (i, a) every
+    T = chan.rotation (column k orbital k in the canonical MOs; the identity
+    for a canonical channel), (i, a) every
     canonical pair in C order (the rows of low.xpy), (t, u) the active
     occupied times the active virtual orbitals of chan.active_space in C
     order (the active ph pairs of `_active_ph`), O and U
@@ -689,9 +704,13 @@ def active_orbital_overlaps(chan):
         U (n_av, nvirt)  U_ua = <active virtual u | a>  = T[a, u],
 
     T = chan.rotation, the rows in the order of active_space.occ_active and
-    .virt_active, i and a every canonical occupied and virtual orbital.
+    .virt_active, i and a every canonical occupied and virtual orbital. A
+    canonical channel (no rotation) has T = 1: its active orbitals are rows
+    of the identity (`hybridized_correlation_energy` takes such a space).
     Reads chan.rotation, chan.nocc and chan.active_space."""
     space, nocc, T = chan.active_space, chan.nocc, chan.rotation
+    if T is None:
+        T = np.eye(len(chan.eps))
     return T[:nocc, space.occ_active].T, T[nocc:, space.virt_active].T
 
 
@@ -931,19 +950,44 @@ def rotated_active_bubble_tau(x, d, eps, nocc, o, u, grid, mu, g):
     (M' = 2M and Y' = 2Y on an exact grid, hence -g where the dense form has
     -2g). x (M, nmo) the canonical collocation, d (M, naux), eps the
     canonical orbital energies, mu the mid-gap P(0) was built with; o, u
-    and g as in `rotated_active_bubble`. Returns (naux, naux). The loop over
-    the tau points is this function's alone: the omega = 0 case, as there."""
+    and g as in `rotated_active_bubble`. Returns (naux, naux). M' is
+    `active_pair_tau_sum` at the one row cosft_wt[0]: the omega = 0 case,
+    as there."""
     n = len(o) * len(u)
-    m, y = np.zeros((n, n)), np.zeros((n, d.shape[1]))
+    m = active_pair_tau_sum(o, u, eps, nocc, grid.tau_points,
+                            grid.cosft_wt[:1], mu)[0]
+    y = np.zeros((n, d.shape[1]))
     for tau, w in zip(grid.tau_points, grid.cosft_wt[0]):
         e_occ = np.exp((eps[:nocc] - mu) * tau)
         e_vir = np.exp(-(eps[nocc:] - mu) * tau)
-        g_occ, g_vir = (o * e_occ) @ o.T, (u * e_vir) @ u.T
         x_occ, x_vir = (x[:, :nocc] * e_occ) @ o.T, (x[:, nocc:] * e_vir) @ u.T
-        m += w * np.kron(g_occ, g_vir)
         pairs = (x_occ[:, :, None] * x_vir[:, None, :]).reshape(len(x), n)
         y += w * (d.T @ pairs).T
     return -g * y.T @ np.linalg.solve(m, y)
+
+
+def active_pair_tau_sum(o, u, eps, nocc, tau_points, weights, mu):
+    """sum_tau weights[k, tau] g_occ(tau) (x) g_vir(tau), (n_w, n, n) with
+    n = n_ao n_av, the (t,u) pairs in C order: the imaginary-time pair
+    propagator of the active orbitals on the canonical ones, transformed by
+    each row k of `weights` (n_w, n_tau),
+
+        g_occ[t,s](tau) = sum_i O_ti O_si exp((eps_i - mu) tau),
+        g_vir[u,v](tau) = sum_a U_ua U_va exp(-(eps_a - mu) tau),
+
+    so that the canonical pair (i, a) enters with exp(-(eps_a - eps_i) tau),
+    mu cancelling in the product. o (n_ao, nocc), u (n_av, nvirt) as in
+    `rotated_active_bubble`; eps the canonical orbital energies, mu a
+    mid-gap. The one sum of M' in `rotated_active_bubble_tau` (cosft_wt[0])
+    and of Pi(i w_k) in `hybridized_pi_tau` (every row of cosft_wt)."""
+    n = len(o) * len(u)
+    out = np.zeros((len(weights), n, n))
+    for j, tau in enumerate(tau_points):
+        e_occ = np.exp((eps[:nocc] - mu) * tau)
+        e_vir = np.exp(-(eps[nocc:] - mu) * tau)
+        g_occ, g_vir = (o * e_occ) @ o.T, (u * e_vir) @ u.T
+        out += weights[:, j, None, None] * np.kron(g_occ, g_vir)
+    return out
 
 
 # ---------------------- 2. the active correlation energy and the static defect
@@ -1104,6 +1148,146 @@ def _active_ec_quadrature(low, chans, v_eff):
     for k, (pi_k, wt) in enumerate(zip(pi, weights)):
         pu = pi_k[:, None] * k_ph
         e_c += wt * (dielectric_log_determinant(eye - pu, k) + np.trace(pu))
+    return float(e_c / (2.0 * np.pi))
+
+
+def hybridized_correlation_energy(low, active_space, v_eff):
+    """E_c^{A,Delta}[v_eff] (spec 6b): the RPA correlation energy of the
+    active space with its orbitals dressed by the coupling to the
+    environment, the ring sum of E_c^A with the active propagators expanded
+    in the canonical orbitals. `downfold` reports E_c^{A,Delta} - E_c^A as
+    e_c_hybridization, the E_0 term of the model with Delta (zero_body.py).
+
+    With O_ti = <active occupied t | i> and U_ua = <active virtual u | a>
+    (`active_orbital_overlaps`), m[(t,u),(i,a)] = O_ti U_ua (the transpose
+    of `active_pair_projection`), i, a every canonical occupied and virtual
+    orbital and d_ia = eps_a - eps_i their canonical energies, and K the ph
+    block of v_eff on the active ph pairs (`_active_ph`, the semicanonical
+    active basis, occupied first):
+
+        Pi(i w) = g m diag(-2 d / (d^2 + w^2)) m^T,
+        E_c^{A,Delta} = 1/(2 pi) int dw Tr[ln(1 - Pi K) + Pi K].
+
+    Each route builds it on the grid of the full E_c, as E_c^A (spec
+    Section 8), so that with every orbital active the E_c terms of E_0
+    cancel to rounding on any grid:
+
+    casida: the plasmon form over all canonical pairs
+        (`hybridized_ec_plasmon`), as large as the full casida problem.
+    imagfrequency: the frequency sum on low.cache['grid'] with the exact
+        Lorentzian Pi above (`hybridized_ec_quadrature`).
+    space-time: the frequency sum on low.cache['energy_grid'] with its
+        omega_weights, Pi(i w_k) = -g sum_tau cosft_wt[k, tau] g_occ(tau)
+        (x) g_vir(tau) (`hybridized_pi_tau`): exp(-d tau) pushed through
+        the energy's own tau -> omega transform, as the full chi0 was, at
+        the canonical mid-gap (`_mid_gap`). The exact Lorentzian there would
+        break the cancellation (measured 5.0e-7 on NH3, every orbital
+        active, 10 tau points and 6 frequencies).
+
+    The frequency sums take the log-determinant from
+    `dielectric_log_determinant` (`hybridized_ec_sum`), with its warning
+    and flag. E_c^A is the same with O and U restricted to the active block
+    at the semicanonical energies, so the two agree for canonical active
+    orbitals (a space without a basis is taken: T = 1) and with every
+    orbital active. For an unrestricted result `active_space` is the pair (alpha,
+    beta) and v_eff the blocks (aa, ab, bb): Pi is block diagonal in the
+    channels, g = 1 (spec 6c). Zero, not computed, when no channel has an
+    active ph pair."""
+    chans = _channels(low, active_space)
+    v_eff = _two_body_blocks(v_eff, chans)
+    if not any(0 < c.active_space.n_act_occ < c.active_space.n_act
+               for c in chans):
+        return 0.0
+    _, k_ph, _ = _active_ph(chans, v_eff)
+    g = spin_weight(chans)
+    if low.mode == 'space-time':
+        grid = low.cache['energy_grid']
+        pis = hybridized_pi_tau(
+            [(*active_orbital_overlaps(c), _canonical(c).eps,
+              _canonical(c).nocc, _mid_gap(c)) for c in chans], grid, g)
+        return hybridized_ec_sum(pis, k_ph, grid.omega_weights)
+    deltas = [_delta(_canonical(c)) for c in chans]
+    ms = [active_pair_projection(c).T for c in chans]
+    if low.mode == 'casida':
+        return hybridized_ec_plasmon(deltas, ms, k_ph, g)
+    points, weights = low.cache['grid']
+    return hybridized_ec_quadrature(deltas, ms, k_ph, g, points, weights)
+
+
+def hybridized_ec_plasmon(deltas, ms, k_ph, g):
+    """E_c^{A,Delta} by the plasmon formula over the canonical pairs of all
+    channels, stacked: A - B = d, A + B = d + 2g K with K = m^T k_ph m,
+
+        E = 1/2 (sum Omega - sum d - g tr K),  Omega^2 = eig(d^1/2 (d + 2g K) d^1/2).
+
+    deltas[c] (n_pair_c,): eps_a - eps_i of channel c's canonical pairs;
+    ms[c] (n_ph_c, n_pair_c): m[(t,u),(i,a)] = O_ti U_ua; k_ph: v_eff on the
+    stacked active ph pairs; g: the spin weight, 2 for the one channel of a
+    restricted reference, 1 for each of two. An Omega^2 <= 0 is refused
+    (`CasidaInstability`), as in the full RPA. As large as the full casida
+    problem."""
+    d, m = np.concatenate(deltas), block_diag(*ms)
+    k, s = m.T @ k_ph @ m, np.sqrt(d)
+    w2 = np.linalg.eigvalsh(s[:, None] * (np.diag(d) + 2.0 * g * k)
+                            * s[None, :])
+    if w2.min() <= 0.0:
+        raise CasidaInstability(
+            f'the RPA of the hybridized active space has omega^2 = '
+            f'{w2.min():.3e} <= 0 Ha^2: v_eff makes it unstable, and '
+            f'E_c^(A,Delta) does not exist.')
+    return float(0.5 * (np.sqrt(w2).sum() - d.sum() - g * np.trace(k)))
+
+
+def hybridized_ec_quadrature(deltas, ms, k_ph, g, points, weights):
+    """E_c^{A,Delta} on an imaginary-frequency grid (points, weights) with
+    the exact Lorentzian Pi (`hybridized_pi_frequency`) and the log-det sum
+    (`hybridized_ec_sum`); the arguments as in `hybridized_ec_plasmon`.
+    The imagfrequency route of `hybridized_correlation_energy`."""
+    return hybridized_ec_sum(hybridized_pi_frequency(deltas, ms, g, points),
+                             k_ph, weights)
+
+
+def hybridized_pi_frequency(deltas, ms, g, points):
+    """Pi(i w_k) of the hybridized active pairs at each of `points`, block
+    diagonal in the channels: g m_c diag(-2 d_c / (d_c^2 + w_k^2)) m_c^T per
+    channel c (`frequency_factor`), the arguments as in
+    `hybridized_ec_plasmon`. A list of (n_ph, n_ph) matrices."""
+    return [block_diag(*[g * (m * frequency_factor(d, w, True)) @ m.T
+                         for d, m in zip(deltas, ms)]) for w in points]
+
+
+def hybridized_pi_tau(channels, grid, g):
+    """Pi(i w_k) of the hybridized active pairs in imaginary time on the
+    TimeFrequencyGrid `grid`, one per frequency point, block diagonal in the
+    channels: per channel
+
+        Pi(i w_k) = -g sum_tau cosft_wt[k, tau] g_occ(tau) (x) g_vir(tau)
+
+    (`active_pair_tau_sum`), exp(-d tau) pushed through the grid's own
+    tau -> omega transform in place of the Lorentzian -2 d / (d^2 + w^2).
+    channels: per channel (o, u, eps, nocc, mu), the active orbitals on the
+    canonical ones (`active_orbital_overlaps`), the canonical orbital
+    energies and occupied count, and the canonical mid-gap. A list of
+    (n_ph, n_ph) matrices."""
+    per = [-g * active_pair_tau_sum(o, u, eps, nocc, grid.tau_points,
+                                    grid.cosft_wt, mu)
+           for o, u, eps, nocc, mu in channels]
+    return [block_diag(*[p[k] for p in per])
+            for k in range(len(grid.omega_weights))]
+
+
+def hybridized_ec_sum(pis, k_ph, weights):
+    """1/(2 pi) sum_k weights_k [ln det(1 - Pi_k K) + tr(Pi_k K)]: the
+    frequency sum of E_c^{A,Delta} over one dense Pi_k per frequency point
+    (`hybridized_pi_frequency`, `hybridized_pi_tau`), K = k_ph the v_eff on
+    the stacked active ph pairs. The log-determinant comes from
+    `dielectric_log_determinant`, with its warning and flag for a
+    non-positive det(1 - Pi K), as in `_active_ec_quadrature`."""
+    eye = np.eye(len(k_ph))
+    e_c = 0.0
+    for k, (pi_k, wt) in enumerate(zip(pis, weights)):
+        pk = pi_k @ k_ph
+        e_c += wt * (dielectric_log_determinant(eye - pk, k) + np.trace(pk))
     return float(e_c / (2.0 * np.pi))
 
 

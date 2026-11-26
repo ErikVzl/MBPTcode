@@ -22,6 +22,12 @@ class DownfoldingTerms:
     e_c_active: the correlation energy of the active space alone.
     dc: the double-counting convention, 'full' or 'hartree'.
     diagnostics: free-form record of the method's own checks and settings.
+    e_c_hybridization: E_c^{A,Delta} - E_c^A, how much the RPA correlation
+        energy of the active space changes when its orbitals are dressed by
+        the coupling to the environment (spec 6b; zero_body.py). Nonzero
+        only when the general layer built that coupling (an active space on
+        a rotated orbital basis, Delta on: the method's `downfold` gets
+        hybridization=True); else 0.0, not computed. Always 0.0 for 'hf'.
     """
     vtilde: tuple
     sigma_bar: Optional[tuple]
@@ -29,3 +35,4 @@ class DownfoldingTerms:
     e_c_active: float
     dc: str
     diagnostics: dict = field(default_factory=dict)
+    e_c_hybridization: float = 0.0

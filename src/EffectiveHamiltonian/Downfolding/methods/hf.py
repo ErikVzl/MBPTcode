@@ -51,18 +51,24 @@ def run(mf, **opts):
     return HFLowLevel(mf=mf)
 
 
-def downfold(low, active_space, **opts):
+def downfold(low, active_space, hybridization=False, **opts):
     """The DownfoldingTerms of HF: vtilde = 0 on the n_act active orbitals of
     `active_space`, one block for the ActiveSpace of a restricted reference and
     the three (aa, ab, bb) for the pair of an unrestricted one; no static
-    self-energy, both correlation energies zero, and the full double counting
+    self-energy, every correlation energy zero, and the full double counting
     (of a zero vtilde). HF takes no options. An active space with an
     orbital basis is taken like any other: the terms are zeros, and the
-    general layer rotates the orbitals."""
+    general layer rotates the orbitals.
+
+    hybridization: what the general layer passes, True when it built the
+        coupling of a rotated basis (Delta on). HF has no correlation
+        energy, of the decoupled active space or of the hybridized one, so
+        e_c_hybridization is 0.0 either way."""
     _no_options(opts)
     parts = channels_of(active_space)
     n_act = parts[0].n_act
     blocks = 1 if len(parts) == 1 else 3
     return DownfoldingTerms(
         vtilde=tuple(np.zeros((n_act,) * 4) for _ in range(blocks)),
-        sigma_bar=None, e_c_full=0.0, e_c_active=0.0, dc='full')
+        sigma_bar=None, e_c_full=0.0, e_c_active=0.0, dc='full',
+        e_c_hybridization=0.0)

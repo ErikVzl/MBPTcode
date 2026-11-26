@@ -209,7 +209,11 @@ class DownfoldedHamiltonian:
     """One effective Hamiltonian, as `build_effective_hamiltonian` returns it.
 
     g_eff: {0: E_0, 1: h_eff, 2: v_eff}, the input of the active-space
-        solvers. space: the active space in QDPT's form (n_orbs,
+        solvers: the decoupled active space, all three parts, so g_eff[0]
+        is energies.e0_without_delta, the constant without the Delta term
+        e_c_hybridization (zero_body.py); with a coupling on the record
+        energies.e0, every term, is the constant of the model with Delta,
+        and the two differ. space: the active space in QDPT's form (n_orbs,
         n_elec_active, the index arrays, spin_free, active_space, and for an
         unrestricted reference spin_overlap). energies: the `Energies`, every
         term of E_0. diagnostics: the low-level method's checks, keyed by
@@ -230,7 +234,10 @@ class DownfoldedHamiltonian:
 
     def solve(self, solver, **kwargs):
         """The lowest energies of this Hamiltonian by `solver`
-        (src.EffectiveHamiltonian.solvers.solve.solve), E_0 included: the
+        (src.EffectiveHamiltonian.solvers.solve.solve), E_0 included: g_eff
+        solved as it is, so the constant is g_eff[0] =
+        energies.e0_without_delta and the energies are those of the
+        decoupled active space, without Delta. The
         record's g_eff, orbital and electron counts and spin_free are filled
         in, and for an unrestricted reference its spin_overlap, so <S^2>
         can be reported (out=...). Other kwargs go to `solve`."""
@@ -358,6 +365,13 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     coupling is identically zero: nothing is built, hybridization is None
     and there is no 'fock_coupling' entry, whatever `delta` is. _blocks
     (tests only) replaces DEFAULT_BLOCKS, the blocks the coupling folds.
+    Exactly when the coupling is built the method's `downfold` gets
+    hybridization=True and E_0 gains its one Delta term,
+    energies.e_c_hybridization = E_c^{A,Delta} - E_c^A (method 'rpa';
+    0.0 for 'hf'): energies.e0 holds it, energies.e0_without_delta and
+    g_eff[0] do not (zero_body.py). Without a coupling the term is 0.0,
+    not computed, and the three are one number. `hybridization` itself is
+    not an option here (TypeError): it follows from `delta` and the basis.
 
     `numerical_flags` lists every named flag behind this
     Hamiltonian (src.Base.numerical_flags): those of the low-level run
@@ -368,6 +382,10 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     mol = mf.mol
     mo, eps, nocc = _spin_channels(mf)
     settings = _settings(low, numerics)
+    if 'hybridization' in method_opts:
+        raise TypeError(
+            'hybridization is not an option of build_effective_hamiltonian: '
+            'it follows from delta and the orbital basis of the space.')
     if numerics is not None:
         method_opts['numerics'] = settings
     flags = []
@@ -379,6 +397,10 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         unrestricted = len(spaces) == 2
         method = require_choice(low.method, tuple(LOW_LEVEL), 'method')
         mo, rotations = _rotated_orbitals(mo, eps, spaces)
+        # the coupling is built below exactly when this holds; the method
+        # then adds the E_0 term of the hybridized space (e_c_hybridization)
+        if rotated and delta:
+            method_opts['hybridization'] = True
         # `downfold` is called from this function itself, not from a helper:
         # the method's warnings count the frames up to the caller of this one
         terms = LOW_LEVEL[method].downfold(
@@ -392,7 +414,9 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         v_eff = effective_interaction(
             mol, tuple(c[:, s.act] for c, s in zip(mo, spaces)), terms.vtilde)
         energies = assemble_energies(mf.energy_nuc(), core, dc, terms)
-        g_eff = pack(h_eff, v_eff, energies.e0, spin_free)
+        # g_eff is the decoupled model, all three parts: its constant is
+        # e0_without_delta, never e0 (zero_body.py)
+        g_eff = pack(h_eff, v_eff, energies.e0_without_delta, spin_free)
         diagnostics = dict(terms.diagnostics)
         coupling = None
         if rotated and delta:
