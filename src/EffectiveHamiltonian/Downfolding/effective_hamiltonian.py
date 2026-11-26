@@ -208,22 +208,22 @@ def _require_delta_route(spaces, delta):
 class DownfoldedHamiltonian:
     """One effective Hamiltonian, as `build_effective_hamiltonian` returns it.
 
-    g_eff: {0: E_0, 1: h_eff, 2: v_eff}, the input of the active-space
-        solvers: the decoupled active space, all three parts, so g_eff[0]
-        is energies.e0_without_delta, the constant without the Delta term
-        e_c_hybridization (zero_body.py); with a coupling on the record
-        energies.e0, every term, is the constant of the model with Delta,
-        and the two differ. space: the active space in QDPT's form (n_orbs,
-        n_elec_active, the index arrays, spin_free, active_space, and for an
-        unrestricted reference spin_overlap). energies: the `Energies`, every
-        term of E_0. diagnostics: the low-level method's checks, keyed by
-        name. numerical_flags: the named flags behind this Hamiltonian
-        (src.Base.numerical_flags), each {'flag': name, 'message': text};
-        empty for a clean result. hybridization: the Fock coupling
-        (`Coupling`, hybridization.py) between the active and the
-        environment orbitals of an active space on a rotated orbital basis,
-        the term Delta folds; None for canonical orbitals and with
-        delta=False.
+    g_eff: {0: e0_without_delta, 1: h_eff, 2: v_eff}, the input of the
+        active-space solvers: the decoupled active space, all three parts, so
+        g_eff[0] is energies.e0_without_delta, the constant without the Delta
+        term e_c_hybridization (zero_body.py); with a coupling on the record
+        energies.e0, every term, is the constant of the model with Delta, and
+        the two differ by e_c_hybridization. space: the active space in QDPT's
+        form (n_orbs, n_elec_active, the index arrays, spin_free,
+        active_space, and for an unrestricted reference spin_overlap).
+        energies: the `Energies`, every term of E_0. diagnostics: the
+        low-level method's checks, keyed by name. numerical_flags: the named
+        flags behind this Hamiltonian (src.Base.numerical_flags), each
+        {'flag': name, 'message': text}; empty for a clean result.
+        hybridization: the Fock coupling (`Coupling`, hybridization.py)
+        between the active and the environment orbitals of an active space on
+        a rotated orbital basis, the term Delta folds; None for canonical
+        orbitals and with delta=False.
     """
     g_eff: dict
     space: dict
@@ -307,11 +307,11 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
 
     g_eff and space follow QDPT's build_effective_hamiltonian, so g_eff goes
     straight to src.EffectiveHamiltonian.solvers.solve.solve:
-    g_eff = {0: E_0, 1: h_eff, 2: physicist v_eff}, spatial when spin_free,
-    else over the 2 n_act interleaved spin orbitals; space holds n_orbs,
-    n_elec_active, act_idx, act_occ_idx, act_vir_idx (canonical spatial
-    indices), spin_free and active_space. energies is the `Energies` record
-    of every E_0 term; diagnostics are the method's, keyed by name.
+    g_eff = {0: e0_without_delta, 1: h_eff, 2: physicist v_eff}, spatial when
+    spin_free, else over the 2 n_act interleaved spin orbitals; space holds
+    n_orbs, n_elec_active, act_idx, act_occ_idx, act_vir_idx (canonical
+    spatial indices), spin_free and active_space. energies is the `Energies`
+    record of every E_0 term; diagnostics are the method's, keyed by name.
 
     For an unrestricted reference (UHF/UKS) `active_space` is a pair
     (space_alpha, space_beta), one ActiveSpace per spin with independent
