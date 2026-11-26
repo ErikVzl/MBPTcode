@@ -83,6 +83,7 @@ pytest test_downfolding_one_body.py
 pytest test_downfolding_masks.py
 pytest test_downfolding_no_density.py
 pytest test_downfolding_no_basis.py
+pytest test_downfolding_no_layer.py
 pytest test_downfolding_qp.py
 pytest test_downfolding_reference.py
 pytest test_downfolding_routes.py

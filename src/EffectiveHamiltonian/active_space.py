@@ -54,8 +54,18 @@ from functools import cached_property
 import numpy as np
 from pyscf import symm
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import QP_DEGENERACY_TOL
+from src.Base.numerics.numerics import numerics_or_default
 from src.Base.orbital_spaces import closed_shell_nocc
+
+
+class NearDegenerateCutWarning(RuntimeWarning):
+    """The cut of an active space through a rotated block of its orbital
+    basis separates an active and an environment orbital whose occupations
+    differ by less than numerics.downfolding.no_cut_warn (and by at least
+    QP_DEGENERACY_TOL, below which it is refused): the active space is
+    built as asked, but which of the two is active is close to arbitrary."""
 
 class ReorderedMF:
     """Minimal mean-field shim with the MOs permuted to
@@ -270,7 +280,8 @@ class ActiveSpace:
         occupied orbital; one spin of an unrestricted pair holds n_act_occ."""
         return 2 * self.n_act_occ
 
-    def require_no_degenerate_cut(self, eps, spin=None):
+    def require_no_degenerate_cut(self, eps, spin=None, numerics=None,
+                                  stacklevel=2):
         """Refuse a boundary that splits a degenerate set.
 
         An active and an environment orbital of the same kind (both occupied
@@ -280,11 +291,30 @@ class ActiveSpace:
         to a virtual one is not a cut and is never compared. `eps` are the
         orbital energies of this space's channel; `spin` ('alpha' or 'beta')
         names that channel in the message for an unrestricted reference.
+
+        With a basis, a block it rotates (`basis.rotates_occupied`,
+        `basis.rotates_virtual`; natural orbitals rotate the virtual block,
+        and the occupied one with rotate_occupied) is compared on the
+        occupations of the basis instead, by their difference: below QP_DEGENERACY_TOL
+        the cut is refused (exact symmetry partners), below
+        numerics.downfolding.no_cut_warn (None: the defaults) it is made with
+        a NearDegenerateCutWarning and the flag 'no_cut_near_degenerate',
+        which name the pairs. A block the basis leaves as the identity keeps
+        the check on `eps`. stacklevel: where the warning points, as for
+        warnings.warn, counted from this method (2: its caller).
         """
         eps = np.asarray(eps)
         which = 'the active space' if spin is None else f'the {spin} active space'
-        for act, env in ((self.occ_active, self.env_occ),
-                         (self.virt_active, self.env_virt)):
+        blocks = ((self.occ_active, self.env_occ),
+                  (self.virt_active, self.env_virt))
+        if self.basis is not None:
+            rotated = (self.basis.rotates_occupied,
+                       self.basis.rotates_virtual)
+            self._require_no_occupation_cut(
+                [b for b, r in zip(blocks, rotated) if r], which, numerics,
+                stacklevel + 1)
+            blocks = [b for b, r in zip(blocks, rotated) if not r]
+        for act, env in blocks:
             for a in act:
                 for e in env:
                     if abs(eps[a] - eps[e]) < QP_DEGENERACY_TOL:
@@ -295,6 +325,37 @@ class ActiveSpace:
                             f"than {QP_DEGENERACY_TOL:g}. Take the whole set, "
                             f"e.g. with ActiveSpace.from_irreps or "
                             f"ActiveSpace.from_population.")
+
+    def _require_no_occupation_cut(self, blocks, which, numerics, stacklevel):
+        """The check of `require_no_degenerate_cut` on the occupations of the
+        basis, over the (active, environment) index pairs of `blocks`;
+        stacklevel counted from this method, as for warnings.warn."""
+        occ = np.asarray(self.basis.occupations)
+        warn_below = numerics_or_default(numerics).downfolding.no_cut_warn
+        near = []
+        for act, env in blocks:
+            for a in act:
+                for e in env:
+                    gap = abs(occ[a] - occ[e])
+                    if gap < QP_DEGENERACY_TOL:
+                        raise ValueError(
+                            f"{which} cuts a degenerate pair of its orbital "
+                            f"basis: active orbital {a} (occupation "
+                            f"{occ[a]:.6f}) and environment orbital {e} "
+                            f"(occupation {occ[e]:.6f}) differ by less than "
+                            f"{QP_DEGENERACY_TOL:g}. Take both or neither.")
+                    if gap < warn_below:
+                        near.append(f"active orbital {a} (occupation "
+                                    f"{occ[a]:.6f}) and environment orbital "
+                                    f"{e} (occupation {occ[e]:.6f})")
+        if near:
+            flag('no_cut_near_degenerate',
+                 f"{which} cuts its orbital basis between orbitals whose "
+                 f"occupations differ by less than no_cut_warn = "
+                 f"{warn_below:g}: " + '; '.join(near) + ". The space is "
+                 f"built as asked; which of them is active is close to "
+                 f"arbitrary.", NearDegenerateCutWarning,
+                 stacklevel=stacklevel)
 
     @property
     def is_contiguous(self):
@@ -310,7 +371,16 @@ class ActiveSpace:
         return self.occ_active, self.virt_active, self.env_occ, self.env_virt
 
     def permuted_mf(self, mf):
-        """Mean-field shim with the MOs permuted so this window is contiguous (see the module docstring on why that is safe)."""
+        """Mean-field shim with the MOs permuted so this window is contiguous (see the module docstring on why that is safe).
+
+        Refused (ValueError) for a space with a basis: its indices number
+        rotated orbitals, which the shim, and QDPT on it, would take for the
+        canonical ones."""
+        if self.basis is not None:
+            raise ValueError(
+                'permuted_mf permutes canonical orbitals; this active space '
+                'indexes the orbitals of a rotated basis (natural orbitals), '
+                'which QDPT would take for canonical ones.')
         return ReorderedMF(mf, self.act)
 
     def contiguous_counts(self):

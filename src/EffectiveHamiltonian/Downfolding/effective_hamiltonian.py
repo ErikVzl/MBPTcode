@@ -32,6 +32,7 @@ import numpy as np
 from pyscf import scf
 
 from src.Base.numerical_flags import collecting, gathered
+from src.Base.numerics.numerics import numerics_or_default
 from src.Base.orbital_spaces import closed_shell_nocc, unrestricted_nocc
 from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             get_orbital_energies,
@@ -41,6 +42,8 @@ from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             unrestricted_reference_diagnostics)
 from src.Base.utils.parallel.mpi_grid import grid_comm
 from src.Base.utils.choices import require_choice
+from src.EffectiveHamiltonian.orbital_basis import (orbitals_source,
+                                                    semicanonical_rotation)
 from src.EffectiveHamiltonian.solvers.determinants import (
     spatial_to_spin_orbitals)
 from src.EffectiveHamiltonian.solvers.solve import solve
@@ -70,13 +73,17 @@ def _spin_channels(mf):
             unrestricted_nocc(mf.mo_occ))
 
 
-def _active_spaces(active_space, eps, nocc):
+def _active_spaces(active_space, mo, eps, nocc, numerics):
     """The `ActiveSpace` of each spin channel as a tuple: one for a
     restricted reference, (alpha, beta) for an unrestricted one, whose active
     space is a pair with the same number of active orbitals. Each space must
-    be set up for the orbital and occupied counts of its own channel, and
-    must not cut a degenerate set of its channel's orbitals
-    (`ActiveSpace.require_no_degenerate_cut`)."""
+    be set up for the orbital and occupied counts of its own channel, its
+    orbital basis, if it has one, must fit it and be built on that channel's
+    orbitals `mo` (`_require_basis_of`), and it must not cut a degenerate
+    set of its channel's orbitals (`ActiveSpace.require_no_degenerate_cut`,
+    on the occupations of a rotated block, which warns below
+    numerics.downfolding.no_cut_warn, pointing at the caller of
+    build_effective_hamiltonian)."""
     paired = isinstance(active_space, (tuple, list))
     if len(eps) == 1:
         if paired:
@@ -97,17 +104,85 @@ def _active_spaces(active_space, eps, nocc):
                 f'the alpha and beta active spaces hold {spaces[0].n_act} and '
                 f'{spaces[1].n_act} orbitals; both spins take the same number '
                 f'of active orbitals.')
-    for space, e, n, spin in zip(spaces, eps, nocc, names):
+    for space, c, e, n, spin in zip(spaces, mo, eps, nocc, names):
+        which, has = (('the active space', f'{n} occupied') if spin is None
+                      else (f'the {spin} active space',
+                            f'{n} {spin} occupied'))
         if (space.norb, space.nocc) != (len(e), n):
-            which, has = (('the active space', f'{n} occupied') if spin is None
-                          else (f'the {spin} active space',
-                                f'{n} {spin} occupied'))
             raise ValueError(
                 f'{which} is set up for {space.nocc} occupied of '
                 f'{space.norb} orbitals; the mean field has {has} of '
                 f'{len(e)}.')
-        space.require_no_degenerate_cut(e, spin)
+        if space.basis is not None:
+            _require_basis_of(space, c, which)
+        # stacklevel 4: the caller of build_effective_hamiltonian
+        space.require_no_degenerate_cut(e, spin, numerics=numerics,
+                                        stacklevel=4)
     return spaces
+
+
+def _settings(low, numerics):
+    """The Numerics of a build, resolved once by the low-level record's
+    `settings` (which refuses what its method cannot take); a record without
+    one, a method that keeps no numerics, gets `numerics` or the defaults."""
+    resolve = getattr(low, 'settings', None)
+    return numerics_or_default(numerics) if resolve is None else resolve(
+        numerics)
+
+
+def _require_basis_of(space, mo, which):
+    """Refuse (ValueError) an orbital basis that does not fit its active
+    space (occupied count, shape of the rotation) or was built on other
+    orbitals than `mo`, the current orbitals of its channel: another molecule
+    or geometry, or a mean field converged again since."""
+    basis = space.basis
+    shape = np.shape(basis.rotation)
+    if basis.nocc != space.nocc or shape != (space.norb, space.norb):
+        raise ValueError(
+            f'the orbital basis of {which} holds {basis.nocc} occupied '
+            f'orbitals in a rotation of shape {shape}; the space is set up '
+            f'for {space.nocc} occupied of {space.norb} orbitals.')
+    if basis.source != orbitals_source(mo):
+        raise ValueError(
+            f'the orbital basis of {which} was built on other orbitals than '
+            f'those of this mean field (another molecule or geometry, or the '
+            f'mean field converged again since): build it from a low-level '
+            f'run on this mean field.')
+
+
+def _require_basis_route(low, spaces):
+    """Refuse what the general layer does not do with an orbital basis,
+    whatever the method: a basis on one spin of an unrestricted pair only
+    (ValueError), an unrestricted reference with a basis (not yet,
+    NotImplementedError) and the exact four-index integrals of an RPA run
+    (df=False), which have no three-index factors to rotate. Nothing for
+    canonical spaces."""
+    with_basis = [s.basis is not None for s in spaces]
+    if not any(with_basis):
+        return
+    if len(spaces) == 2:
+        if not all(with_basis):
+            raise ValueError(
+                'an orbital basis on one spin only: the alpha and beta '
+                'active spaces of an unrestricted reference both take one, '
+                'or neither.')
+        raise NotImplementedError(
+            'an unrestricted reference on a rotated orbital basis: the two '
+            'spin channels are written and not yet tested (Task 7b).')
+    if not getattr(low, 'df', True):
+        raise NotImplementedError(
+            'an active space on a rotated orbital basis needs the '
+            'three-index factors, which a df=False low-level result (the '
+            'exact four-index integrals) does not keep: use df=True.')
+
+
+def _rotated_orbitals(mo, eps, spaces):
+    """The orbitals of each channel in the basis of its active space: the
+    canonical `mo` itself for a space without a basis, else mo @ T with T
+    the semicanonical rotation of the basis (`semicanonical_rotation`)."""
+    return tuple(c if s.basis is None
+                 else c @ semicanonical_rotation(s.basis, s, e)[0]
+                 for c, e, s in zip(mo, eps, spaces))
 
 
 @dataclass(frozen=True, eq=False)
@@ -193,7 +268,7 @@ def run_low_level(mf, method='rpa', **method_opts):
 
 
 def build_effective_hamiltonian(low, active_space, spin_free=True,
-                                **method_opts):
+                                numerics=None, **method_opts):
     """The `DownfoldedHamiltonian` of `active_space`, downfolded from the
     low-level result `low`: g_eff, space, energies, diagnostics and
     numerical_flags. `h.solve(solver)` solves it.
@@ -225,6 +300,26 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     supplies vtilde, Sigma_bar, the correlation-energy pair and the
     double-counting mode. method_opts go to the method's `downfold`.
 
+    numerics: None, or the Numerics of this build, resolved once by the
+    low-level record (`low.settings`): for method='rpa' it may differ from
+    the run's in the downfolding and layout sections (refused otherwise,
+    NumericsMismatch) and is handed to `downfold`; method='hf' takes none
+    (TypeError). The general layer reads the cut check's
+    downfolding.no_cut_warn from it.
+
+    An ActiveSpace with an orbital basis (`OrbitalBasis`, natural orbitals)
+    indexes the orbitals of that basis made semicanonical in each of its
+    index sets: the Fock operator of the core, the active integrals and
+    space['mo'] are those of mo @ T (`semicanonical_rotation`), and space
+    also holds 'basis'. Its cut is checked on the occupations of each
+    rotated block (`ActiveSpace.require_no_degenerate_cut`: refused below
+    QP_DEGENERACY_TOL, NearDegenerateCutWarning and the flag
+    'no_cut_near_degenerate' below no_cut_warn). Refused: a basis built on
+    other orbitals than the mean field's or that does not fit its space
+    (ValueError), the exact integrals of an RPA run (df=False,
+    NotImplementedError), and, not yet, an unrestricted reference with a
+    basis (NotImplementedError).
+
     `numerical_flags` lists every named flag behind this
     Hamiltonian (src.Base.numerical_flags): those of the low-level run
     (`low.numerical_flags`) and those raised while building it, each
@@ -233,11 +328,16 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     mf = low.mf
     mol = mf.mol
     mo, eps, nocc = _spin_channels(mf)
-    spaces = _active_spaces(active_space, eps, nocc)
-    unrestricted = len(spaces) == 2
-    method = require_choice(low.method, tuple(LOW_LEVEL), 'method')
+    settings = _settings(low, numerics)
+    if numerics is not None:
+        method_opts['numerics'] = settings
     flags = []
     with collecting(flags):
+        spaces = _active_spaces(active_space, mo, eps, nocc, settings)
+        _require_basis_route(low, spaces)
+        unrestricted = len(spaces) == 2
+        method = require_choice(low.method, tuple(LOW_LEVEL), 'method')
+        mo = _rotated_orbitals(mo, eps, spaces)
         # `downfold` is called from this function itself, not from a helper:
         # the method's warnings count the frames up to the caller of this one
         terms = LOW_LEVEL[method].downfold(
@@ -281,7 +381,9 @@ def _check_terms(terms, method, unrestricted):
 def _space(mf, mo, spaces, spin_free):
     """The `space` record of `build_effective_hamiltonian`: the active space
     in the form QDPT's builder gives it, each index entry a pair (alpha, beta)
-    for an unrestricted reference, which also gets spin_overlap."""
+    for an unrestricted reference, which also gets spin_overlap. `mo` are the
+    orbitals of the spaces (rotated where a space has a basis); a space with
+    a basis adds 'basis' and 'mo', the rotated coefficients, for viewers."""
     restricted = len(spaces) == 1
 
     def per_channel(view):
@@ -300,6 +402,9 @@ def _space(mf, mo, spaces, spin_free):
     }
     if not restricted:
         space['spin_overlap'] = _spin_overlap(mf, mo, spaces)
+    if any(s.basis is not None for s in spaces):
+        space['basis'] = per_channel(lambda s: s.basis)
+        space['mo'] = mo[0] if restricted else mo
     return space
 
 

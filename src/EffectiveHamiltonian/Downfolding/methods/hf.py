@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from src.Base.numerics.numerics import numerics_or_default
+
 from ..spin import channels_of
 from ..low_level import DownfoldingTerms
 
@@ -26,6 +28,14 @@ class HFLowLevel:
     mf: object
     method: str = METHOD
     numerical_flags: list = field(default_factory=list)
+
+    def settings(self, numerics):
+        """The Numerics a build on this result uses: the defaults. HF keeps
+        none and takes none: a given `numerics` is refused (TypeError), as
+        every option of this method is."""
+        if numerics is not None:
+            _no_options({'numerics': numerics})
+        return numerics_or_default(None)
 
 
 def _no_options(opts):
@@ -46,7 +56,9 @@ def downfold(low, active_space, **opts):
     `active_space`, one block for the ActiveSpace of a restricted reference and
     the three (aa, ab, bb) for the pair of an unrestricted one; no static
     self-energy, both correlation energies zero, and the full double counting
-    (of a zero vtilde). HF takes no options."""
+    (of a zero vtilde). HF takes no options. An active space with an
+    orbital basis is taken like any other: the terms are zeros, and the
+    general layer rotates the orbitals."""
     _no_options(opts)
     parts = channels_of(active_space)
     n_act = parts[0].n_act

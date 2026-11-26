@@ -30,7 +30,9 @@ The fields:
     layout      memory and tiling: recorded, not in the identity
     adc         the excitation-energy ADC solve of a state model
     properties  the spin-orbit operator of the properties pass
-    downfolding the static environment self-energy of the RPA downfolding
+    downfolding the static environment self-energy of the RPA downfolding,
+                and the warning on the cut of an active space through a
+                rotated orbital basis
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
@@ -50,6 +52,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DEFAULT_BROADENING_ETA,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
                                          DOWNFOLDING_CONTINUATION_MARGIN,
+                                         DOWNFOLDING_NO_CUT_WARN,
                                          DOWNFOLDING_POLE_MARGIN, DOWNFOLDING_SRG_S,
                                          EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
                                          EVGW_MAX_CYCLE, EVGW_TOL, IMAGFREQ_NFREQ, GW_DENSITY_NFREQ,
@@ -522,13 +525,18 @@ class DownfoldingNumerics:
     routes (imagfrequency, space-time), where both forms are continued from
     the imaginary axis and warn within max(pole_margin/sqrt(2 s),
     continuation_margin). The margins decide the warning alone
-    (SigmaNearPoleWarning); Sigma_bar is computed either way.
+    (SigmaNearPoleWarning); Sigma_bar is computed either way. no_cut_warn:
+    the cut of an active space through a rotated block of its orbital basis
+    (`ActiveSpace.require_no_degenerate_cut`) between an active and an
+    environment orbital whose occupations differ by less than this runs
+    with a NearDegenerateCutWarning (below QP_DEGENERACY_TOL it is refused).
 
     Refused when built: srg_s that is not a finite positive number or None,
-    and a negative pole_margin or continuation_margin."""
+    and a negative pole_margin, continuation_margin or no_cut_warn."""
     srg_s: Optional[float] = DOWNFOLDING_SRG_S
     pole_margin: float = DOWNFOLDING_POLE_MARGIN
     continuation_margin: float = DOWNFOLDING_CONTINUATION_MARGIN
+    no_cut_warn: float = DOWNFOLDING_NO_CUT_WARN
 
     def __post_init__(self):
         if self.srg_s is not None and not (math.isfinite(self.srg_s)
@@ -542,6 +550,9 @@ class DownfoldingNumerics:
             raise ValueError(f'continuation_margin='
                              f'{self.continuation_margin!r}: a non-negative '
                              'distance, Hartree')
+        if not self.no_cut_warn >= 0:
+            raise ValueError(f'no_cut_warn={self.no_cut_warn!r}: a '
+                             'non-negative difference of two occupations')
 
 
 @dataclass(frozen=True)

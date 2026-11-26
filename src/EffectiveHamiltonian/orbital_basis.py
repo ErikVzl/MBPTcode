@@ -26,8 +26,10 @@ class NaturalDensity:
     ov_fro: float
 
 
-def _sha256(array):
-    return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()
+def orbitals_source(mo_coeff):
+    """sha256 hex of the bytes of the `mo_coeff` of one spin channel: the
+    `source` of an OrbitalBasis built on those orbitals."""
+    return hashlib.sha256(np.ascontiguousarray(mo_coeff).tobytes()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,20 @@ class OrbitalBasis:
     occupations: np.ndarray
     nocc: int
     source: str
+
+    @property
+    def rotates_occupied(self):
+        """True when the occupied block is rotated, i.e. is not the identity:
+        its orbitals are then not the canonical occupied ones."""
+        nocc = int(self.nocc)
+        return not np.array_equal(self.rotation[:nocc, :nocc], np.eye(nocc))
+
+    @property
+    def rotates_virtual(self):
+        """True when the virtual block is rotated, i.e. is not the identity."""
+        nocc, norb = int(self.nocc), len(self.rotation)
+        return not np.array_equal(self.rotation[nocc:, nocc:],
+                                  np.eye(norb - nocc))
 
     @property
     def digest(self):
@@ -100,7 +116,7 @@ def natural_orbital_basis(low, rotate_occupied=False):
         rotation[:nocc, :nocc] = np.eye(nocc)
     occupations[nocc:], rotation[nocc:, nocc:] = descending(nat.gamma_vv)
     return OrbitalBasis(rotation, occupations, nocc,
-                        _sha256(low.mf.mo_coeff))
+                        orbitals_source(low.mf.mo_coeff))
 
 
 def semicanonical_rotation(basis, active_space, eps):

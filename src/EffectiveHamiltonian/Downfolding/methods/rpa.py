@@ -60,7 +60,8 @@ from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
 from src.EffectiveHamiltonian.active_space import (ActiveSpace,
                                                    active_pair_mask,
                                                    ph_element_mask)
-from src.EffectiveHamiltonian.orbital_basis import NaturalDensity
+from src.EffectiveHamiltonian.orbital_basis import (NaturalDensity,
+                                                    semicanonical_rotation)
 from src.SingleReference.GW.density_matrix import (
     casida_unrelaxed_blocks, imagfrequency_unrelaxed_blocks,
     space_time_unrelaxed_blocks)
@@ -223,6 +224,34 @@ class RPALowLevel:
         """True for a UHF/UKS reference: two spin channels."""
         return isinstance(self.nocc, tuple)
 
+    def settings(self, numerics):
+        """The Numerics a build on this result uses: the run's (None: the
+        defaults) when `numerics` is None, else `numerics` itself, which may
+        differ from the run's in its downfolding section (the settings of
+        Sigma^E and of the cut check, which act after the RPA) and in its
+        layout (memory and tiling, not part of the numerical identity). Any
+        other difference is refused (NumericsMismatch, a ValueError, naming
+        the fields): the run used those."""
+        if numerics is None:
+            return numerics_or_default(self.numerics)
+        held = numerics_or_default(self.numerics).values()
+        asked = numerics.values()
+        differ = [f'{section}.{name}' for section in held
+                  if section not in ('downfolding', 'layout')
+                  for name in held[section]
+                  if held[section][name] != asked[section][name]]
+        if differ:
+            raise NumericsMismatch(
+                f"method={METHOD!r}: the numerics of a build can differ from "
+                f"those of the low-level run in numerics.downfolding (srg_s, "
+                f"pole_margin, continuation_margin, the settings of Sigma^E, "
+                f"and no_cut_warn, which act after the RPA) and "
+                f"numerics.layout (memory and tiling) alone; these differ "
+                f"in {', '.join(differ)}, which the run used. Derive the "
+                f"build's numerics from the run's, or call run_low_level with "
+                f"them.")
+        return numerics
+
 
 def run(mf, mode='casida', df=True, numerics=None, qp=False,
         natural_orbitals=False, **opts):
@@ -350,8 +379,9 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         (low.numerics); or a Numerics whose downfolding section (srg_s,
         pole_margin, continuation_margin) is used for this Hamiltonian
         instead. They act after the RPA, so one low-level result serves any
-        number of them; `low` itself keeps its own. Every other section has
-        to equal the run's, which used it (NumericsMismatch otherwise).
+        number of them; `low` itself keeps its own. The layout may differ
+        too; every other section has to equal the run's, which used it
+        (NumericsMismatch otherwise, `RPALowLevel.settings`).
 
     E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
     pairs with v_eff = v + vtilde, v the same integrals as the full RPA
@@ -362,6 +392,13 @@ def downfold(low, active_space, screening='crpa', sigma=None,
     run, e.g. the same object converged at another geometry: the driver
     reads the orbitals from the mean field, and they would no longer be
     those of the screening kept here.
+
+    An ActiveSpace with an orbital basis gets the rotated spin channel
+    (`_channels`): E_c^A on the semicanonical active pairs and the rotated
+    v. 'qp_energies' is left out, and sigma_energies='qp' refused
+    (NotImplementedError): the QP energies are those of the canonical
+    orbitals. Not built yet, and refused (NotImplementedError): every
+    screening but 'bare' and every sigma but None.
     """
     _refuse_options(opts, 'downfold')
     low = _with_settings(low, numerics)
@@ -376,6 +413,9 @@ def downfold(low, active_space, screening='crpa', sigma=None,
             f"sigma_energies={sigma_energies!r} chooses where Sigma_bar^E is "
             f"evaluated, and sigma=None builds none: pass sigma='srg' or "
             f"'averaged'.")
+    rotated = any(p.basis is not None for p in channels_of(active_space))
+    if rotated:
+        _refuse_with_a_basis(screening, sigma, sigma_energies)
     chans = _channels(low, active_space)
     vt = _two_body_blocks(screening_correction(low, active_space, screening),
                           chans)
@@ -390,7 +430,7 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         dense = _active_ec_casida(low, chans, v_eff) if pairs else 0.0
         recorded['ec_active_casida'] = {'casida': dense,
                                         'difference': e_c_active - dense}
-    if 'qp_energies' in names and low.qp is not None:
+    if 'qp_energies' in names and low.qp is not None and not rotated:
         recorded['qp_energies'] = {
             name: _per_channel([values[i][c.active_space.act]
                                 for i, c in enumerate(chans)])
@@ -410,6 +450,25 @@ def downfold(low, active_space, screening='crpa', sigma=None,
     return DownfoldingTerms(
         vtilde=vt, sigma_bar=sigma_bar, e_c_full=low.e_c_full,
         e_c_active=e_c_active, dc=dc, diagnostics=recorded)
+
+
+def _refuse_with_a_basis(screening, sigma, sigma_energies):
+    """Refuse (NotImplementedError) what `downfold` does not do on an active
+    space with an orbital basis: the QP energies, which belong to the
+    canonical orbitals, and, not yet, 'mrpa' and Sigma^E."""
+    if sigma_energies == 'qp':
+        raise NotImplementedError(
+            f"method={METHOD!r} sigma_energies='qp' takes the QP energies of "
+            f"the canonical orbitals; an active space on a rotated orbital "
+            f"basis has none. Use sigma_energies='mf'.")
+    if screening == 'mrpa':
+        raise NotImplementedError(
+            f"method={METHOD!r} screening='mrpa' on a rotated orbital basis "
+            f"is not built yet (Task 4a).")
+    if sigma is not None:
+        raise NotImplementedError(
+            f"method={METHOD!r} sigma={sigma!r} on a rotated orbital basis is "
+            f"not built yet (Task 5); sigma=None is.")
 
 
 # ---------------------------------------- 1. the screening correction (vtilde)
@@ -488,6 +547,13 @@ def screening_correction(low, active_space, screening):
     static tau grid (low.cache['static_grid']).
     """
     screening = require_choice(screening, SCREENINGS, 'screening')
+    if screening != 'bare' and any(p.basis is not None
+                                   for p in channels_of(active_space)):
+        task = 'Task 4a' if low.mode == 'casida' else 'Task 4b'
+        raise NotImplementedError(
+            f"method={METHOD!r} screening={screening!r} on a rotated orbital "
+            f"basis is not built yet on mode={low.mode!r} ({task}); "
+            f"screening='bare' is.")
     if screening == 'mrpa':
         if low.mode != 'casida':
             raise NotImplementedError(
@@ -513,7 +579,7 @@ def screening_correction(low, active_space, screening):
         k_rr, v_rt = _residual_integrals(low, chans, res)
         apb = (2.0 * g) * k_rr
         apb[np.diag_indices_from(apb)] += _join(
-            [_delta(c, r) for c, r in zip(chans, res)])
+            [_delta(_canonical(c), r) for c, r in zip(chans, res)])
         factor = cho_factor(apb)
         solved = [cho_solve(factor, v) for v in v_rt]
         vt = [((-2.0 * g) * v_rt[s].T @ solved[t]).reshape((n,) * 4)
@@ -532,8 +598,8 @@ def _residual_integrals(low, chans, res):
     channel. From the integrals of the full RPA, low.factors or low.eri."""
     n = chans[0].active_space.n_act
     if low.factors is not None:
-        b_res = _join([_ov_factors(c)[:, r] for c, r in zip(chans, res)],
-                      axis=1)
+        b_res = _join([_ov_factors(_canonical(c))[:, r]
+                       for c, r in zip(chans, res)], axis=1)
         return b_res.T @ b_res, [b_res.T @ _act_factors(c) for c in chans]
     k_rows, v_cols = [], [[] for _ in chans]
     for s, (chan_s, res_s) in enumerate(zip(chans, res)):
@@ -616,6 +682,8 @@ def _pair_factors(low, chan):
         n, x_act = len(act), x[:, act]
         pairs = (x_act[:, :, None] * x_act[:, None, :]).reshape(len(x), n * n)
         return (d.T @ pairs).reshape(d.shape[1], n, n)
+    if chan.rotation is not None:
+        return chan.rotated_factors[:, :, act]
     return chan.factors[:, act][:, :, act]
 
 
@@ -652,7 +720,8 @@ def active_polarizability_static(low, active_space):
             k, act = chan.active_space.n_act_occ, chan.active_space.act
             if k == 0 or k == chan.active_space.n_act:
                 continue
-            mu = particle_hole_window(chan.eps, chan.nocc)[2]
+            canonical = _canonical(chan)
+            mu = particle_hole_window(canonical.eps, canonical.nocc)[2]
             term = chi0_imaginary_frequency(
                 chan.collocation[:, act], d, chan.eps[act], k,
                 low.cache['static_grid'], mu=mu,
@@ -666,8 +735,9 @@ def active_polarizability_static(low, active_space):
     blocks = []
     for chan in chans:
         mask = active_pair_mask(chan.active_space)
-        blocks.append((_ov_factors(chan)[:, mask],
-                       frequency_factor(_delta(chan, mask), 0.0, True)))
+        canonical = _canonical(chan)
+        blocks.append((_ov_factors(canonical)[:, mask],
+                       frequency_factor(_delta(canonical, mask), 0.0, True)))
     return chi0_aux(blocks, spin_weight(chans))
 
 
@@ -709,7 +779,7 @@ def _active_ov(low, chans):
     is read: the casida W(0) of `static_defect`."""
     n = chans[0].active_space.n_act
     if low.factors is not None:
-        b_ov = _join([_ov_factors(c) for c in chans], axis=1)
+        b_ov = _join([_ov_factors(_canonical(c)) for c in chans], axis=1)
         return [_act_factors(c).T @ b_ov for c in chans]
     out = []
     for s, chan_s in enumerate(chans):
@@ -2366,28 +2436,17 @@ def _require_current_mean_field(low):
 
 
 def _with_settings(low, numerics):
-    """`low` under the Sigma^E settings of `numerics`, its downfolding
-    section (srg_s, pole_margin, continuation_margin), in place of the
-    run's: the same result, sharing its cache; `low` itself for None. The
-    settings act after the RPA, so they can change from one Hamiltonian to
-    the next without a new run. Every other section was used by the run
-    and has to be the run's: a difference is refused (NumericsMismatch, a
-    ValueError), naming the fields."""
+    """`low` under the settings of `numerics` (`RPALowLevel.settings`: its
+    downfolding section, the Sigma^E settings srg_s, pole_margin and
+    continuation_margin, and its layout) in place of the run's: the same
+    result, sharing its cache; `low` itself for None. The settings act after
+    the RPA, so they can change from one Hamiltonian to the next without a
+    new run. Every other section was used by the run and has to be the
+    run's: a difference is refused (NumericsMismatch, a ValueError), naming
+    the fields."""
     if numerics is None:
         return low
-    held, asked = numerics_or_default(low.numerics).values(), numerics.values()
-    differ = [f'{section}.{name}' for section in held
-              if section != 'downfolding' for name in held[section]
-              if held[section][name] != asked[section][name]]
-    if differ:
-        raise NumericsMismatch(
-            f"method={METHOD!r}: the numerics of a build can differ from "
-            f"those of the low-level run in numerics.downfolding alone "
-            f"(srg_s, pole_margin, continuation_margin, the settings of "
-            f"Sigma^E, which act after the RPA); these differ in "
-            f"{', '.join(differ)}, which the run used. Derive the build's "
-            f"numerics from the run's, or call run_low_level with them.")
-    return replace(low, numerics=numerics)
+    return replace(low, numerics=low.settings(numerics))
 
 
 def _require_factors(low, who):
@@ -2460,19 +2519,36 @@ class _Channel:
     the occupied count and the three-index factors (None without) of that
     spin, its ActiveSpace, its name, 'alpha' or 'beta' (None for the one
     channel of a restricted reference), and on space-time its collocation
-    X (M, nmo) in the MO basis (None on the other routes)."""
+    X (M, nmo) in the MO basis (None on the other routes).
+
+    For an ActiveSpace with an orbital basis the channel is rotated
+    (`_rotated_channel`): `rotation` is the semicanonical T (nmo, nmo) of
+    `semicanonical_rotation`, column k orbital k in the canonical MOs; eps
+    are the semicanonical energies eps_sc; `factors` is None, and
+    `rotated_factors` (naux, n_act, nmo) holds the one block of the rotated
+    three-index factors that is formed, B_Q,tj = sum_pq B_Q,pq T_pt T_qj,
+    its rows the active orbitals in the order of active_space.act and its
+    columns every orbital of the rotated basis by its index there (None on
+    space-time, which has no factors); the collocation is X T; `canonical`
+    is the unrotated channel of the same request, what everything that
+    contracts with the run's canonical quantities (X+Y, P(0), the grids)
+    reads. All three are None on a canonical channel."""
     eps: np.ndarray
     nocc: int
     factors: Optional[np.ndarray]
     active_space: object
     spin: Optional[str]
     collocation: Optional[np.ndarray] = None
+    canonical: Optional['_Channel'] = None
+    rotation: Optional[np.ndarray] = None
+    rotated_factors: Optional[np.ndarray] = None
 
 
 def _channels(low, active_space):
     """The spin channels of `low` with the active spaces of `active_space`:
     one, for a restricted result and one ActiveSpace; two, for an unrestricted
-    result and the pair (alpha, beta). Anything else is refused."""
+    result and the pair (alpha, beta). Anything else is refused. The channel
+    of a space with an orbital basis is rotated (`_rotated_channels`)."""
     parts = channels_of(active_space)
     if not low.unrestricted:
         if len(parts) != 1:
@@ -2480,13 +2556,60 @@ def _channels(low, active_space):
                 f'a restricted low-level result takes one ActiveSpace; got '
                 f'{len(parts)}. A pair (alpha, beta) goes with an '
                 f'unrestricted (UHF/UKS) one.')
-        return (replace(_reference_channels(low)[0], active_space=parts[0]),)
-    if len(parts) != 2:
-        raise ValueError(
-            'an unrestricted (UHF/UKS) low-level result takes a pair of '
-            'ActiveSpaces, (alpha, beta), one per spin; got one.')
-    return tuple(replace(chan, active_space=p)
-                 for chan, p in zip(_reference_channels(low), parts))
+        chans = (replace(_reference_channels(low)[0], active_space=parts[0]),)
+    else:
+        if len(parts) != 2:
+            raise ValueError(
+                'an unrestricted (UHF/UKS) low-level result takes a pair of '
+                'ActiveSpaces, (alpha, beta), one per spin; got one.')
+        chans = tuple(replace(chan, active_space=p)
+                      for chan, p in zip(_reference_channels(low), parts))
+    if any(p.basis is not None for p in parts):
+        return _rotated_channels(low, chans)
+    return chans
+
+
+def _rotated_channels(low, chans):
+    """`chans` with the channel of each space that has an orbital basis
+    rotated (`_rotated_channel`). One build calls `_channels` six or seven
+    times, so the channels of the last request with a basis are kept in
+    low.cache['rotated'], beside the spaces they belong to, and an equal
+    request (the same indices and basis) gets them back. Refused
+    (NotImplementedError) on the exact four-index integrals (df=False),
+    which have no three-index factors to rotate."""
+    parts = tuple(c.active_space for c in chans)
+    held = low.cache.get('rotated')
+    if held is not None and held[0] == parts:
+        return held[1]
+    if low.mode != 'space-time' and low.factors is None:
+        raise NotImplementedError(
+            f"method={METHOD!r}: an active space on a rotated orbital basis "
+            f"needs the three-index factors, which a df=False low-level "
+            f"result (the exact four-index integrals) does not keep: use "
+            f"df=True.")
+    rotated = tuple(chan if chan.active_space.basis is None
+                    else _rotated_channel(chan) for chan in chans)
+    low.cache['rotated'] = (parts, rotated)
+    return rotated
+
+
+def _rotated_channel(chan):
+    """The channel `chan` (canonical, with its ActiveSpace) in the
+    semicanonical orbitals of its space's basis (`_Channel`)."""
+    space = chan.active_space
+    T, eps_sc = semicanonical_rotation(space.basis, space, chan.eps)
+    b = None
+    if chan.factors is not None:
+        b = np.einsum('Qpq,pt,qj->Qtj', chan.factors, T[:, space.act], T,
+                      optimize=True)
+    x = None if chan.collocation is None else chan.collocation @ T
+    return _Channel(eps_sc, chan.nocc, None, space, chan.spin, x,
+                    canonical=chan, rotation=T, rotated_factors=b)
+
+
+def _canonical(chan):
+    """The unrotated channel of `chan`: `chan` itself when it is canonical."""
+    return chan if chan.canonical is None else chan.canonical
 
 
 def _reference_channels(low):
@@ -2570,8 +2693,14 @@ def _ov_factors(chan):
 
 
 def _act_factors(chan):
-    """B_Q,tu (naux, n_act^2) of the active orbitals of one channel."""
-    b, act = chan.factors, chan.active_space.act
+    """B_Q,tu (naux, n_act^2) of the active orbitals of one channel; of a
+    rotated channel from its rotated_factors, whose rows are the active
+    orbitals already."""
+    act = chan.active_space.act
+    if chan.rotation is not None:
+        b = chan.rotated_factors
+        return b[:, :, act].reshape(b.shape[0], len(act) ** 2)
+    b = chan.factors
     return b[:, act][:, :, act].reshape(b.shape[0], len(act) ** 2)
 
 

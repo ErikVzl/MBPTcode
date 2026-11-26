@@ -3,6 +3,8 @@ downfolding (tests/test_downfolding_no_*.py)."""
 from pyscf import dft, scf
 
 from src.Base.numerics.numerics import Numerics
+from src.EffectiveHamiltonian.active_space import ActiveSpace
+from src.EffectiveHamiltonian.orbital_basis import natural_orbital_basis
 from tests.downfolding_oracle import water as _water_hf
 from tests.gw_density_routes import mean_field as _nh3_mean_field
 
@@ -28,3 +30,17 @@ def ammonia(xc='hf'):
     """NH3/cc-pVDZ, density fitted on cc-pvdz-ri, RHF ('hf') or RKS with
     `xc` ('pbe0'), as the space-time cases of tests/test_downfolding_routes.py."""
     return _nh3_mean_field('HF' if xc == 'hf' else xc.upper())
+
+
+def no_space(low, n_occ, n_virt, rotate_occupied=False):
+    """The ActiveSpace of `low`'s natural orbitals (`natural_orbital_basis`)
+    with n_occ active occupied and n_virt active virtual orbitals: the n_occ
+    highest canonical occupied orbitals (with rotate_occupied, the n_occ
+    occupied NOs with the largest holes) and the n_virt virtual NOs of
+    largest occupation. Each rotated block is in order of descending
+    occupation, so both are the last n_occ occupied and the first n_virt
+    virtual orbitals of the basis."""
+    basis = natural_orbital_basis(low, rotate_occupied=rotate_occupied)
+    nocc, norb = basis.nocc, len(basis.occupations)
+    return ActiveSpace.from_indices(norb, nocc, range(nocc - n_occ, nocc),
+                                    range(nocc, nocc + n_virt), basis=basis)

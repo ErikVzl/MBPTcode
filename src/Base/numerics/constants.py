@@ -370,6 +370,15 @@ DOWNFOLDING_OMEGA_LANCZOS_SEED = 0
 # (246 there), so the loop costs nothing; the block moves only the memory
 # and the order of the sum over excitations.
 DOWNFOLDING_SIGMA_TILE_GB = 0.25
+# The cut of an active space through a rotated block of an orbital basis
+# (natural orbitals): an active and an environment orbital of the same kind
+# whose occupations differ by less than this run, with a
+# NearDegenerateCutWarning (`ActiveSpace.require_no_degenerate_cut`); below
+# QP_DEGENERACY_TOL the cut is refused. A difference, not a ratio: the same
+# number for occupations and for holes. 2e-3 lies between the MOBH35 cuts
+# that were accepted (differences of 0.006 to 0.010) and those called
+# near-degenerate (0.0012 and 0.0003).
+DOWNFOLDING_NO_CUT_WARN = 2e-3
 
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.
