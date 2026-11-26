@@ -43,10 +43,12 @@ from src.Base.numerics.constants import (BYTES_PER_GB,
                                          GW_DENSITY_W_FIT_TIKHONOV)
 from src.Base.numerics.numerics import (NumericsMismatch,
                                         numerics_or_default, rpa_quadrature)
-from src.Base.orbital_spaces import (closed_shell_nocc, particle_hole_window,
-                                     transition_range, unrestricted_nocc)
+from src.Base.orbital_spaces import (closed_shell_nocc, ov_energies,
+                                     particle_hole_window, transition_range,
+                                     unrestricted_nocc)
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
+                                            get_spin_factor,
                                             get_two_electron_integrals_chemist)
 from src.Base.utils.choices import require_choice
 from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
@@ -58,6 +60,10 @@ from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
 from src.EffectiveHamiltonian.active_space import (ActiveSpace,
                                                    active_pair_mask,
                                                    ph_element_mask)
+from src.EffectiveHamiltonian.orbital_basis import NaturalDensity
+from src.SingleReference.GW.density_matrix import (
+    casida_unrelaxed_blocks, imagfrequency_unrelaxed_blocks,
+    space_time_unrelaxed_blocks)
 from src.SingleReference.GW.imaginary_axis import (
     fitted_self_energy_matrix_imaginary_axis, screening_fit_grid,
     self_energy_diagonal_imaginary_axis)
@@ -192,6 +198,8 @@ class RPALowLevel:
         `run_low_level`.
     qp: None, or with run(..., qp=True) the `QuasiParticles` of every
         orbital of every spin channel: a result of the run, like e_c_full.
+    natural: None, or with run(..., natural_orbitals=True) the oo and vv
+        blocks of the unrelaxed RPA density (`NaturalDensity`).
     """
     mf: object
     mode: str
@@ -208,6 +216,7 @@ class RPALowLevel:
     method: str = METHOD
     numerical_flags: list = field(default_factory=list)
     qp: Optional['QuasiParticles'] = None
+    natural: Optional[NaturalDensity] = None
 
     @property
     def unrestricted(self):
@@ -215,7 +224,8 @@ class RPALowLevel:
         return isinstance(self.nocc, tuple)
 
 
-def run(mf, mode='casida', df=True, numerics=None, qp=False, **opts):
+def run(mf, mode='casida', df=True, numerics=None, qp=False,
+        natural_orbitals=False, **opts):
     """The RPALowLevel of `mf`: the full direct RPA of `mode`, solved once.
 
     mode: 'casida' | 'imagfrequency' | 'space-time'.
@@ -233,6 +243,11 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False, **opts):
     qp: False, or True for the quasiparticle spectrum as well: one-shot
         diagonal G0W0 on this run's W for every orbital of every spin
         channel, kept as low.qp (`quasiparticles`).
+    natural_orbitals: False, or True for the oo and vv blocks of the GW
+        density as well (`_natural_density`), kept as low.natural: the
+        unrelaxed density of the same route, on casida from this run's own
+        eigenvectors. A restricted reference only (NotImplementedError for
+        UHF/UKS: there is no unrestricted GW density).
 
     On casida E_RPA,corr comes from the same solve as Omega and X+Y; on
     imagfrequency from `rpa_correlation_energy_imaginary_axis` on the
@@ -245,7 +260,16 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False, **opts):
     if not isinstance(qp, (bool, np.bool_)):
         raise TypeError(f"qp={qp!r}: True (the one-shot G0W0 spectrum) or "
                         f"False.")
+    if not isinstance(natural_orbitals, (bool, np.bool_)):
+        raise TypeError(f"natural_orbitals={natural_orbitals!r}: True (the "
+                        f"oo and vv blocks of the GW density) or False.")
     eps, nocc, channels = _reference(mf)
+    if natural_orbitals and isinstance(nocc, tuple):
+        raise NotImplementedError(
+            f"method={METHOD!r} natural_orbitals=True needs the GW density "
+            f"of a restricted reference; there is no unrestricted GW "
+            f"density, so the natural orbitals of a UHF/UKS run do not "
+            f"exist.")
     _require_route(mode, df, channels)
     route = {'casida': _casida_fields,
              'imagfrequency': _imaginary_axis_fields,
@@ -253,6 +277,8 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False, **opts):
     fields = route(mf, eps, nocc, df, numerics)
     low = RPALowLevel(mf=mf, mode=mode, df=df, numerics=numerics, eps=eps,
                       nocc=nocc, **fields)
+    if natural_orbitals:
+        low.natural = _natural_density(low)
     if qp:
         low.qp = quasiparticles(low)
     return low
@@ -1888,6 +1914,36 @@ def _space_time_fields(mf, eps, nocc, df, numerics):
     e_c, cache = _space_time(mf, eps, nocc, numerics)
     return dict(e_c_full=e_c, omega=None, xpy=None, factors=None, eri=None,
                 cache=cache)
+
+
+def _natural_density(low):
+    """The `NaturalDensity` of a restricted low-level result: the blocks of
+    the unrelaxed GW density of the run's own route (the per-channel blocks
+    of `casida_unrelaxed_blocks`, `imagfrequency_unrelaxed_blocks` or
+    `space_time_unrelaxed_blocks`, times the spin factor), with the
+    reference's 2 on the diagonal of the oo block.
+
+    On casida the run's eigenvectors are the screening, X - Y = (X + Y)
+    omega / delta columnwise (delta the orbital-energy differences of the
+    (i, a) pairs), so there is no second eigensolve. The two imaginary-axis
+    routes rebuild the three-index factors and W themselves."""
+    mf, eps, nocc = low.mf, low.eps, low.nocc
+    if low.mode == 'casida':
+        delta = ov_energies(eps, nocc)
+        xmy = low.xpy * low.omega[None, :] / delta[:, None]
+        screening = (low.omega, (low.xpy + xmy) / 2, (low.xpy - xmy) / 2)
+        blocks = casida_unrelaxed_blocks(mf, mf.mol, eps, nocc, 'RPA', low.df,
+                                         screening=screening)
+    else:
+        numerics = numerics_or_default(low.numerics)
+        route = (imagfrequency_unrelaxed_blocks if low.mode == 'imagfrequency'
+                 else space_time_unrelaxed_blocks)
+        blocks = route(mf, mf.mol, eps, nocc, numerics)
+    oo, ov, vv = (get_spin_factor('restricted') * b for b in blocks)
+    oo = oo + 2.0 * np.eye(nocc)
+    return NaturalDensity(gamma_oo=oo, gamma_vv=vv,
+                          ov_max=float(np.abs(ov).max()),
+                          ov_fro=float(np.linalg.norm(ov)))
 
 
 def _imaginary_axis(eps, nocc, factors, numerics):
