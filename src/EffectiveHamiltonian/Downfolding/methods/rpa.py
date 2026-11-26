@@ -479,7 +479,10 @@ def _refuse_with_a_basis(sigma, sigma_energies):
 # (Scott and Booth's Eq. 5, from the kept X+Y). `downfold` assembles an active
 # space's DownfoldingTerms from it: vtilde, the correlation-energy pair
 # E_c[v] - E_c^A[v_eff] (both by the plasmon formula, on the same v) and the
-# static defect |W(0) - W^A[v_eff](0)|, zero for crpa.
+# static defect |W(0) - W^A[v_eff](0)|, zero for crpa on canonical orbitals.
+# On imagfrequency and space-time the deletion is P(0) - P^A(0) and one Dyson
+# step; on a rotated basis P^A is the active bubble with the residual pairs
+# folded in (`rotated_active_bubble`, `rotated_active_bubble_tau`).
 
 
 def screening_correction(low, active_space, screening):
@@ -553,8 +556,9 @@ def screening_correction(low, active_space, screening):
     6a, "Frequency"), and the downfolding takes the static W^r(0) alone.
     'mrpa' on a rotated basis takes the full RPA's modes on the active pairs
     as the projection E^T xpy (`_mrpa_correction`). On imagfrequency and
-    space-time a rotated basis is refused with every screening but 'bare'
-    (NotImplementedError): not built yet (Task 4b).
+    space-time a rotated basis takes the same P - P^A and Dyson step as
+    below, P^A the active bubble with the residual pairs folded in
+    (`active_polarizability_static`), so that P - P^A is P^r exactly.
 
     On imagfrequency the same correction is P - P^A and one Dyson step,
     vt_tu,vw = sum_PQ B_P,tu [W^r - 1]_PQ B_Q,vw (for two channels B of the
@@ -576,12 +580,6 @@ def screening_correction(low, active_space, screening):
                 f"Casida eigenvectors only: use mode='casida' (this low-level"
                 f" result is mode={low.mode!r}).")
         return _per_block(_mrpa_correction(low, _channels(low, active_space)))
-    if (screening != 'bare' and low.mode != 'casida'
-            and any(p.basis is not None for p in channels_of(active_space))):
-        raise NotImplementedError(
-            f"method={METHOD!r} screening={screening!r} on a rotated orbital "
-            f"basis is not built yet on mode={low.mode!r} (Task 4b); "
-            f"screening='bare' is, and every screening on mode='casida'.")
     chans = _channels(low, active_space)
     spins = BLOCKS[len(chans)]
     n = chans[0].active_space.n_act
@@ -679,13 +677,26 @@ def active_pair_projection(chan):
     T = chan.rotation (column k orbital k in the canonical MOs), (i, a) every
     canonical pair in C order (the rows of low.xpy), (t, u) the active
     occupied times the active virtual orbitals of chan.active_space in C
-    order (the active ph pairs of `_active_ph`). Without an active ph pair
-    E has no column. Reads chan.rotation, chan.nocc and chan.active_space."""
+    order (the active ph pairs of `_active_ph`), O and U
+    `active_orbital_overlaps`. Without an active ph pair E has no column.
+    Reads chan.rotation, chan.nocc and chan.active_space."""
+    o, u = active_orbital_overlaps(chan)
+    e = np.einsum('ti,ua->iatu', o, u)
+    return e.reshape(o.shape[1] * u.shape[1], o.shape[0] * u.shape[0])
+
+
+def active_orbital_overlaps(chan):
+    """(O, U): the active orbitals of the rotated spin channel `chan`
+    (`_rotated_channel`) on its canonical ones,
+
+        O (n_ao, nocc)   O_ti = <active occupied t | i> = T[i, t],
+        U (n_av, nvirt)  U_ua = <active virtual u | a>  = T[a, u],
+
+    T = chan.rotation, the rows in the order of active_space.occ_active and
+    .virt_active, i and a every canonical occupied and virtual orbital.
+    Reads chan.rotation, chan.nocc and chan.active_space."""
     space, nocc, T = chan.active_space, chan.nocc, chan.rotation
-    o = T[:nocc, space.occ_active]
-    u = T[nocc:, space.virt_active]
-    e = np.einsum('it,au->iatu', o, u)
-    return e.reshape(o.shape[0] * u.shape[0], o.shape[1] * u.shape[1])
+    return T[:nocc, space.occ_active].T, T[nocc:, space.virt_active].T
 
 
 def _active_projection(chans):
@@ -797,43 +808,146 @@ def active_polarizability_static(low, active_space):
     -2 sum_ia B_ia B_ia^T / delta_ia with that spin's factors and orbital
     energies: the -4 above is -2g of the one restricted channel. A casida
     result on the exact integrals (df=False) has no factors and is refused
-    (NotImplementedError)."""
+    (NotImplementedError).
+
+    On a rotated orbital basis (natural orbitals; the channel of
+    `_rotated_channel`) the active pairs are coupled to the others by the
+    pair one-body matrix Lambda, and P^A is the bubble of the active pairs
+    with the residual pairs folded in (spec 6a, "Definitions"), so that
+    P - P^A = P^r = -2g B_r^T Lambda_rr^-1 B_r still: -2g Y^T M^-1 Y of
+    `rotated_active_bubble` (casida, imagfrequency) on the canonical
+    factors and pair energies, with the active orbitals on the canonical
+    ones (`active_orbital_overlaps`), and on space-time its imaginary-time
+    form (`rotated_active_bubble_tau`) on the static grid, the canonical
+    collocation and the canonical mid-gap P(0) was built with. It is not
+    the bubble of the decoupled active pairs at the semicanonical energies
+    (P^A_dec, the active space's own), and with every orbital active it is
+    P(0) to rounding, not to the bit. Zero without an active ph pair."""
     _require_factors(low, 'active_polarizability_static')
     chans = _channels(low, active_space)
     if low.mode == 'space-time':
         # per spin, on the grid and with the mid-gap P(0) was built with;
         # the kernel carries the closed-shell factor 2, so the two spins'
         # terms are summed and halved, the arithmetic of `spin_summed`
+        # (a rotated channel's term carries its spin weight already and is
+        # added after)
         d = low.cache['factors'][1]
-        out = None
+        out, rotated = None, []
         for chan in chans:
             k, act = chan.active_space.n_act_occ, chan.active_space.act
             if k == 0 or k == chan.active_space.n_act:
                 continue
             canonical = _canonical(chan)
             mu = particle_hole_window(canonical.eps, canonical.nocc)[2]
+            if chan.rotation is not None:
+                o, u = active_orbital_overlaps(chan)
+                rotated.append(rotated_active_bubble_tau(
+                    canonical.collocation, d, canonical.eps, canonical.nocc,
+                    o, u, low.cache['static_grid'], mu, spin_weight(chans)))
+                continue
             term = chi0_imaginary_frequency(
                 chan.collocation[:, act], d, chan.eps[act], k,
                 low.cache['static_grid'], mu=mu,
                 tile_memory_gb=layout_tile_gb(low.numerics))[0]
             out = term if out is None else out + term
+        if out is not None and len(chans) == 2:
+            out *= 0.5
+        for term in rotated:
+            out = term if out is None else out + term
         if out is None:
             return np.zeros((d.shape[1],) * 2)
-        if len(chans) == 2:
-            out *= 0.5
         return out
-    blocks = []
+    g = spin_weight(chans)
+    blocks, rotated = [], []
     for chan in chans:
-        if chan.rotation is not None:
-            raise NotImplementedError(
-                f"method={METHOD!r}: P^A(0) of the active pairs of a rotated "
-                f"orbital basis is not built from the canonical factors on "
-                f"mode={low.mode!r} yet (Task 4b).")
-        mask = active_pair_mask(chan.active_space)
         canonical = _canonical(chan)
-        blocks.append((_ov_factors(canonical)[:, mask],
-                       frequency_factor(_delta(canonical, mask), 0.0, True)))
-    return chi0_aux(blocks, spin_weight(chans))
+        if chan.rotation is None:
+            mask = active_pair_mask(chan.active_space)
+            blocks.append((_ov_factors(canonical)[:, mask],
+                           frequency_factor(_delta(canonical, mask), 0.0,
+                                            True)))
+        elif 0 < chan.active_space.n_act_occ < chan.active_space.n_act:
+            nocc = canonical.nocc
+            o, u = active_orbital_overlaps(chan)
+            rotated.append(rotated_active_bubble(
+                canonical.factors[:, :nocc, nocc:],
+                _delta(canonical).reshape(nocc, -1), o, u, g))
+    if blocks and not rotated:
+        return chi0_aux(blocks, g)
+    out = chi0_aux(blocks, g) if blocks else None
+    for term in rotated:
+        out = term if out is None else out + term
+    if out is None:
+        naux = _canonical(chans[0]).factors.shape[0]
+        return np.zeros((naux, naux))
+    return out
+
+
+def rotated_active_bubble(b_ov, delta, o, u, g):
+    """P^A(0) = -2g Y^T M^-1 Y of one spin channel whose active orbitals
+    are rotated (spec 6a; two channels, g = 1 each, are summed by the
+    caller, spec 6c), so that p0 - P^A = P^r, the static response of every
+    pair but the active ones of the rotated basis:
+
+        M[(t,u),(s,v)] = sum_ia O_ti O_si U_ua U_va / delta_ia,
+        Y[(t,u), Q]    = sum_ia O_ti U_ua B_Q,ia / delta_ia.
+
+    P^A is the bubble of the active pairs with the residual pairs folded
+    into their energies and vertices (spec 6a, "Definitions"), P = P^A + P^r
+    by the block inverse of the pair one-body matrix Lambda, which is
+    diagonal in the canonical pairs. It depends on the span of the active
+    orbitals only. With canonical active orbitals it is the plain bubble of
+    the active pairs; with rotated ones it is not the bubble of the
+    decoupled active pairs at the semicanonical energies (P^A_dec).
+
+    b_ov (naux, nocc, nvirt) and delta (nocc, nvirt), eps_a - eps_i,
+    canonical; o (n_ao, nocc), u (n_av, nvirt): the active orbitals on the
+    canonical ones (`active_orbital_overlaps`); g the spin weight
+    (`spin_weight`). Returns (naux, naux).
+
+    This is the omega = 0 case. W^r at another frequency is not obtained
+    by changing the weights 1/delta to delta / (delta^2 + w^2): the block
+    inverse holds for one resolvent at a time, and chi0(i w) is a sum of
+    two, so it needs complex M(i w), Y(i w) on (Lambda - i w)^-1 (spec 6a,
+    "Frequency"). The downfolding takes the static W^r(0) alone."""
+    n = len(o) * len(u)
+    m = np.einsum('ti,si,ua,va,ia->tusv', o, o, u, u, 1.0 / delta,
+                  optimize=True).reshape(n, n)
+    y = np.einsum('ti,ua,Qia,ia->tuQ', o, u, b_ov, 1.0 / delta,
+                  optimize=True).reshape(n, -1)
+    return -2.0 * g * y.T @ np.linalg.solve(m, y)
+
+
+def rotated_active_bubble_tau(x, d, eps, nocc, o, u, grid, mu, g):
+    """`rotated_active_bubble` in imaginary time (spec 6a), on the static
+    grid P(0) was built on: 1/delta becomes sum_tau w_tau exp(-delta tau)
+    / 2 with w = grid.cosft_wt[0], and the sums over i, a factorize per tau
+    point,
+
+        g_occ[t,s](tau) = sum_i O_ti O_si exp((eps_i - mu) tau),
+        g_vir[u,v](tau) = sum_a U_ua U_va exp(-(eps_a - mu) tau),
+        x_occ[P,t](tau) = sum_i X_Pi exp((eps_i - mu) tau) O_ti,
+        x_vir[P,u](tau) = sum_a X_Pa exp(-(eps_a - mu) tau) U_ua,
+        M' = sum_tau w_tau g_occ (x) g_vir,
+        Y'[(t,u), Q] = sum_tau w_tau sum_P x_occ[P,t] x_vir[P,u] D_PQ,
+        P^A(0) = -g Y'^T M'^-1 Y'
+
+    (M' = 2M and Y' = 2Y on an exact grid, hence -g where the dense form has
+    -2g). x (M, nmo) the canonical collocation, d (M, naux), eps the
+    canonical orbital energies, mu the mid-gap P(0) was built with; o, u
+    and g as in `rotated_active_bubble`. Returns (naux, naux). The loop over
+    the tau points is this function's alone: the omega = 0 case, as there."""
+    n = len(o) * len(u)
+    m, y = np.zeros((n, n)), np.zeros((n, d.shape[1]))
+    for tau, w in zip(grid.tau_points, grid.cosft_wt[0]):
+        e_occ = np.exp((eps[:nocc] - mu) * tau)
+        e_vir = np.exp(-(eps[nocc:] - mu) * tau)
+        g_occ, g_vir = (o * e_occ) @ o.T, (u * e_vir) @ u.T
+        x_occ, x_vir = (x[:, :nocc] * e_occ) @ o.T, (x[:, nocc:] * e_vir) @ u.T
+        m += w * np.kron(g_occ, g_vir)
+        pairs = (x_occ[:, :, None] * x_vir[:, None, :]).reshape(len(x), n)
+        y += w * (d.T @ pairs).T
+    return -g * y.T @ np.linalg.solve(m, y)
 
 
 # ---------------------- 2. the active correlation energy and the static defect
@@ -1026,6 +1140,14 @@ def static_defect(low, active_space, v_eff):
     W^A[v_eff](0) = v_eff - 2 v_eff[:, ph] (delta_A + 2 K^A)^-1 v_eff[ph, :]
     on the active ph pairs of both spins, and the defect is the largest
     deviation over the three blocks.
+
+    On a rotated orbital basis (natural orbitals) W^A is the RPA of the
+    decoupled active pairs at the semicanonical energies, the active
+    space's own (P^A_dec of spec 6a), while vt deletes the active pairs
+    with their coupling Lambda_AR to the residual ones folded in (P^A,
+    `active_polarizability_static`). The crpa defect is then not zero: it
+    measures that coupling, which the active space does not hold and Delta
+    restores.
     """
     chans = _channels(low, active_space)
     v_eff = _two_body_blocks(v_eff, chans)

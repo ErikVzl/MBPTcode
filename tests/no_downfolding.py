@@ -1,6 +1,7 @@
 """Mean fields and settings shared by the tests of the natural-orbital
-downfolding (tests/test_downfolding_no_*.py), and the brute-force check of
-their residual screening (`brute_force_vt`)."""
+downfolding (tests/test_downfolding_no_*.py), and the brute-force checks of
+their residual screening (`brute_force_vt`) and residual polarizability
+(`brute_force_pr`)."""
 import numpy as np
 from pyscf import dft, scf
 from scipy.linalg import cho_factor, cho_solve
@@ -65,3 +66,18 @@ def brute_force_vt(b, eps, nocc, T, space):
     v_r = b_rot[:, :nocc, nocc:].reshape(len(b), -1)[:, r].T @ b_act
     vt = -4.0 * v_r.T @ cho_solve(cho_factor(apb[np.ix_(r, r)]), v_r)
     return vt.reshape((len(space.act),) * 4)
+
+
+def brute_force_pr(b_ov, eps, nocc, T, space, g=2):
+    """P^r(0) = -2g B_r^T Lambda_rr^-1 B_r of one spin channel (two channels: g = 1 each,
+    summed) by a dense solve over the residual pairs
+    of the rotated basis (every pair but active occupied x active virtual)."""
+    nvirt = len(eps) - nocc
+    F = T.T @ np.diag(eps) @ T
+    lam = (np.einsum('ab,ij->iajb', F[nocc:, nocc:], np.eye(nocc))
+           - np.einsum('ij,ab->iajb', F[:nocc, :nocc], np.eye(nvirt))).reshape(nocc * nvirt, -1)
+    b_rot = np.einsum('Qjb,ji,ba->Qia', b_ov, T[:nocc, :nocc], T[nocc:, nocc:]).reshape(len(b_ov), -1)
+    active = np.zeros((nocc, nvirt), bool)
+    active[np.ix_(space.occ_active, space.virt_active - nocc)] = True
+    r = ~active.ravel()
+    return -2.0 * g * b_rot[:, r] @ np.linalg.solve(lam[np.ix_(r, r)], b_rot[:, r].T)

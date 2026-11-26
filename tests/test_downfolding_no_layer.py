@@ -218,22 +218,33 @@ def test_refused_with_a_basis(low, kwargs, error, match):
         build_effective_hamiltonian(low, no_space(low, 2, 2), **kwargs)
 
 
-def test_screening_of_the_imaginary_axis_waits_for_task_4b(mf):
+def test_screening_of_the_imaginary_axis_with_a_basis(mf):
+    """crpa and crpa_ph build on imagfrequency with a basis; 'mrpa' stays
+    on the Casida eigenvectors."""
     low = run_low_level(mf, method='rpa', mode='imagfrequency',
                         natural_orbitals=True)
-    with pytest.raises(NotImplementedError, match='Task 4b'):
-        build_effective_hamiltonian(low, no_space(low, 2, 2))
-    build_effective_hamiltonian(low, no_space(low, 2, 2), screening='bare')
+    for screening in ('crpa', 'crpa_ph'):
+        h = build_effective_hamiltonian(low, no_space(low, 2, 2),
+                                        screening=screening)
+        assert np.isfinite(h.energies.e_c_active)
+        assert np.all(np.isfinite(h.g_eff[2]))
+    with pytest.raises(NotImplementedError, match="mode='casida'"):
+        build_effective_hamiltonian(low, no_space(low, 2, 2),
+                                    screening='mrpa')
 
 
-def test_active_polarizability_of_a_rotated_space_waits_for_task_4b(low):
-    """P^A of the rotated active pairs is not built from the canonical
-    factors: called directly on a rotated casida space it is refused."""
-    with pytest.raises(NotImplementedError, match='Task 4b'):
-        rpa.active_polarizability_static(low, no_space(low, 2, 2))
-    canonical = replace(no_space(low, 2, 2), basis=None)
-    assert rpa.active_polarizability_static(low, canonical).shape == (
-        (low.factors.shape[0],) * 2)
+def test_active_polarizability_of_a_rotated_space(mf, low):
+    """P^A of the rotated active pairs from the canonical factors: the
+    same on casida as on imagfrequency, on the same factors, and not the
+    canonical space's of the same indices."""
+    space = no_space(low, 2, 2)
+    p_a = rpa.active_polarizability_static(low, space)
+    low_if = run_low_level(mf, method='rpa', mode='imagfrequency')
+    assert np.abs(rpa.active_polarizability_static(low_if, space)
+                  - p_a).max() < 1e-12
+    canonical = replace(space, basis=None)
+    assert np.abs(rpa.active_polarizability_static(low, canonical)
+                  - p_a).max() > 1e-3
 
 
 def test_exact_integrals_refused(mf, low):
