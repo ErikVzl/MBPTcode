@@ -209,9 +209,6 @@ def test_foreign_basis_is_refused(low):
 @pytest.mark.parametrize('kwargs,error,match', [
     (dict(sigma='srg', sigma_energies='qp'), NotImplementedError,
      "sigma_energies='qp'"),
-    (dict(screening='mrpa'), NotImplementedError, 'Task 4a'),
-    (dict(screening='crpa'), NotImplementedError, 'Task 4a'),
-    (dict(screening='crpa_ph'), NotImplementedError, 'Task 4a'),
     (dict(screening='bare', sigma='srg'), NotImplementedError, 'Task 5'),
     (dict(screening='bare', sigma='averaged'), NotImplementedError,
      'Task 5'),

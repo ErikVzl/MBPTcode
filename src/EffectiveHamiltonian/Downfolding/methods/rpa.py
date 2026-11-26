@@ -27,7 +27,7 @@ from typing import Optional
 
 import numpy as np
 from pyscf import scf
-from scipy.linalg import cho_factor, cho_solve
+from scipy.linalg import block_diag, cho_factor, cho_solve
 from scipy.sparse.linalg import ArpackError, LinearOperator, eigsh
 
 from src.Base.factorization.sliced_factors import unpack_factors
@@ -397,8 +397,9 @@ def downfold(low, active_space, screening='crpa', sigma=None,
     (`_channels`): E_c^A on the semicanonical active pairs and the rotated
     v. 'qp_energies' is left out, and sigma_energies='qp' refused
     (NotImplementedError): the QP energies are those of the canonical
-    orbitals. Not built yet, and refused (NotImplementedError): every
-    screening but 'bare' and every sigma but None.
+    orbitals. Every screening is built on casida (`screening_correction`);
+    not built yet, and refused (NotImplementedError): every screening but
+    'bare' on imagfrequency and space-time, and every sigma but None.
     """
     _refuse_options(opts, 'downfold')
     low = _with_settings(low, numerics)
@@ -415,7 +416,7 @@ def downfold(low, active_space, screening='crpa', sigma=None,
             f"'averaged'.")
     rotated = any(p.basis is not None for p in channels_of(active_space))
     if rotated:
-        _refuse_with_a_basis(screening, sigma, sigma_energies)
+        _refuse_with_a_basis(sigma, sigma_energies)
     chans = _channels(low, active_space)
     vt = _two_body_blocks(screening_correction(low, active_space, screening),
                           chans)
@@ -452,19 +453,16 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         e_c_active=e_c_active, dc=dc, diagnostics=recorded)
 
 
-def _refuse_with_a_basis(screening, sigma, sigma_energies):
+def _refuse_with_a_basis(sigma, sigma_energies):
     """Refuse (NotImplementedError) what `downfold` does not do on an active
     space with an orbital basis: the QP energies, which belong to the
-    canonical orbitals, and, not yet, 'mrpa' and Sigma^E."""
+    canonical orbitals, and, not yet, Sigma^E. The screening refuses what
+    is not built yet itself (`screening_correction`)."""
     if sigma_energies == 'qp':
         raise NotImplementedError(
             f"method={METHOD!r} sigma_energies='qp' takes the QP energies of "
             f"the canonical orbitals; an active space on a rotated orbital "
             f"basis has none. Use sigma_energies='mf'.")
-    if screening == 'mrpa':
-        raise NotImplementedError(
-            f"method={METHOD!r} screening='mrpa' on a rotated orbital basis "
-            f"is not built yet (Task 4a).")
     if sigma is not None:
         raise NotImplementedError(
             f"method={METHOD!r} sigma={sigma!r} on a rotated orbital basis is "
@@ -474,7 +472,9 @@ def _refuse_with_a_basis(screening, sigma, sigma_energies):
 # ---------------------------------------- 1. the screening correction (vtilde)
 # `screening_correction` gives the static (omega = 0) screening correction of
 # an active space on the casida route: the active pairs deleted from A+B and
-# one Cholesky solve, or for 'mrpa' (casida only) the interaction that keeps
+# one Cholesky solve (on a rotated orbital basis the same deletion from the
+# stored modes, `residual_solve_from_modes`, without a solve in the pair
+# space), or for 'mrpa' (casida only) the interaction that keeps
 # the full RPA's zeroth moment eta0 = (X+Y)(X+Y)^T on the active ph pairs
 # (Scott and Booth's Eq. 5, from the kept X+Y). `downfold` assembles an active
 # space's DownfoldingTerms from it: vtilde, the correlation-energy pair
@@ -534,6 +534,28 @@ def screening_correction(low, active_space, screening):
     with no active occupied or no active virtual orbital nothing is deleted
     and it is the fully screened W(0) - v on those orbitals.
 
+    An active space on a rotated orbital basis (natural orbitals; its
+    channel rotated by `_rotated_channel`, the active orbitals the
+    semicanonical ones) deletes the active pairs of that basis, which the
+    one-body part Lambda, no longer diagonal, couples to the others. On
+    casida the deletion is the identity of spec 6a on the stored modes,
+    without a solve in the pair space (`residual_solve_from_modes`): with
+    G = xpy diag(1/omega) xpy^T = (A+B)^-1 on the canonical pairs, V^t the
+    (ia|tu) of every canonical pair (i, a) and every active pair (t, u) of
+    channel t's rotated orbitals, and E the active ph pairs on the canonical
+    pairs (`active_pair_projection`, of both channels stacked),
+        vt^{st} = -2g V^s^T [G - G E (E^T G E)^-1 E^T G] V^t,
+    for one restricted channel
+        vt = -4 [V^T G V - (E^T G V)^T (E^T G E)^-1 E^T G V];
+    without an active ph pair the second term is absent and vt is the fully
+    screened W(0) - v. The stored-inverse form is the omega = 0 case: the
+    identity holds at any frequency only for one resolvent at a time (spec
+    6a, "Frequency"), and the downfolding takes the static W^r(0) alone.
+    'mrpa' on a rotated basis takes the full RPA's modes on the active pairs
+    as the projection E^T xpy (`_mrpa_correction`). On imagfrequency and
+    space-time a rotated basis is refused with every screening but 'bare'
+    (NotImplementedError): not built yet (Task 4b).
+
     On imagfrequency the same correction is P - P^A and one Dyson step,
     vt_tu,vw = sum_PQ B_P,tu [W^r - 1]_PQ B_Q,vw (for two channels B of the
     first pair's spin on the left and of the second's on the right; W^r is
@@ -547,13 +569,6 @@ def screening_correction(low, active_space, screening):
     static tau grid (low.cache['static_grid']).
     """
     screening = require_choice(screening, SCREENINGS, 'screening')
-    if screening != 'bare' and any(p.basis is not None
-                                   for p in channels_of(active_space)):
-        task = 'Task 4a' if low.mode == 'casida' else 'Task 4b'
-        raise NotImplementedError(
-            f"method={METHOD!r} screening={screening!r} on a rotated orbital "
-            f"basis is not built yet on mode={low.mode!r} ({task}); "
-            f"screening='bare' is.")
     if screening == 'mrpa':
         if low.mode != 'casida':
             raise NotImplementedError(
@@ -561,6 +576,12 @@ def screening_correction(low, active_space, screening):
                 f"Casida eigenvectors only: use mode='casida' (this low-level"
                 f" result is mode={low.mode!r}).")
         return _per_block(_mrpa_correction(low, _channels(low, active_space)))
+    if (screening != 'bare' and low.mode != 'casida'
+            and any(p.basis is not None for p in channels_of(active_space))):
+        raise NotImplementedError(
+            f"method={METHOD!r} screening={screening!r} on a rotated orbital "
+            f"basis is not built yet on mode={low.mode!r} (Task 4b); "
+            f"screening='bare' is, and every screening on mode='casida'.")
     chans = _channels(low, active_space)
     spins = BLOCKS[len(chans)]
     n = chans[0].active_space.n_act
@@ -574,6 +595,8 @@ def screening_correction(low, active_space, screening):
             correlation=True)
         vt = [(b_act[s].T @ w_r @ b_act[t]).reshape((n,) * 4)
               for s, t in spins]
+    elif any(c.rotation is not None for c in chans):
+        vt = _residual_screening_from_modes(low, chans)
     else:
         g = spin_weight(chans)
         k_rr, v_rt = _residual_integrals(low, chans, res)
@@ -616,6 +639,61 @@ def _residual_integrals(low, chans, res):
     return _square(k_rows), [_join(col) for col in v_cols]
 
 
+def _residual_screening_from_modes(low, chans):
+    """The casida vt of `screening_correction` for rotated channels, one
+    block per spin pair (s, t): vt^{st} = -2g V^s^T [(A+B)_rr]^-1 V^t from
+    the stored modes (`residual_solve_from_modes`), V^t the (ia|tu) of the
+    canonical pairs of every channel, stacked, with the active pairs of
+    channel t (`_active_ov`)."""
+    n = chans[0].active_space.n_act
+    v = [x.T for x in _active_ov(low, chans)]
+    solved = residual_solve_from_modes(low.xpy, low.omega,
+                                       _active_projection(chans),
+                                       _join(v, axis=1))
+    g = spin_weight(chans)
+    return [((-2.0 * g) * v[s].T @ solved[:, t * n * n:(t + 1) * n * n]
+             ).reshape((n,) * 4) for s, t in BLOCKS[len(chans)]]
+
+
+def residual_solve_from_modes(xpy, omega, e, x):
+    """[(A+B)_rr]^-1 x on the residual pairs without a solve in the pair
+    space: spec 6a on the stored modes, xpy diag(1/omega) xpy^T = (A+B)^-1.
+    e (n_pair, n_ph): the active ph pairs on the canonical pairs,
+    e[(i,a),(t,u)] = O_ti U_ua (no column: nothing is deleted); x (n_pair, k).
+    The pairs are those of one spin channel, or of both, stacked (spec 6c).
+    The omega = 0 case."""
+    g = lambda y: xpy @ ((xpy.T @ y) / omega[:, None])
+    gx = g(x)
+    if e.shape[1]:
+        ge = g(e)
+        gx = gx - ge @ np.linalg.solve(e.T @ ge, e.T @ gx)
+    return gx
+
+
+def active_pair_projection(chan):
+    """E (n_pair, n_ph): the active ph pairs of the rotated spin channel
+    `chan` (`_rotated_channel`) on its canonical (i, a) pairs,
+
+        E[(i,a),(t,u)] = O_ti U_ua,   O_ti = T[i, t],  U_ua = T[a, u],
+
+    T = chan.rotation (column k orbital k in the canonical MOs), (i, a) every
+    canonical pair in C order (the rows of low.xpy), (t, u) the active
+    occupied times the active virtual orbitals of chan.active_space in C
+    order (the active ph pairs of `_active_ph`). Without an active ph pair
+    E has no column. Reads chan.rotation, chan.nocc and chan.active_space."""
+    space, nocc, T = chan.active_space, chan.nocc, chan.rotation
+    o = T[:nocc, space.occ_active]
+    u = T[nocc:, space.virt_active]
+    e = np.einsum('it,au->iatu', o, u)
+    return e.reshape(o.shape[0] * u.shape[0], o.shape[1] * u.shape[1])
+
+
+def _active_projection(chans):
+    """`active_pair_projection` of the channels, block diagonal: the active
+    ph pairs of every channel on the canonical pairs of both, stacked."""
+    return block_diag(*[active_pair_projection(c) for c in chans])
+
+
 def _mrpa_correction(low, chans):
     """The 'mrpa' vt of `screening_correction` (casida), one block per spin
     pair. On the active ph pairs of the channels, stacked,
@@ -629,14 +707,26 @@ def _mrpa_correction(low, chans):
     that vt vanishes with every orbital active; it is computed there too,
     not short-cut. eta0_A is a principal block of a positive definite
     matrix, so one Cholesky factor serves both solves. Zero when no channel
-    has an active ph pair."""
+    has an active ph pair.
+
+    For rotated channels the modes on the active pairs are a projection,
+    xpy_A = E^T xpy (`active_pair_projection`), and eta0_A = E^T (xpy xpy^T)
+    E, positive definite as well (E has orthonormal columns); delta_A and
+    (ia|jb) are those of the rotated channels, their semicanonical energies
+    and rotated factors (`_active_ph`). The result is the interaction for
+    which the RPA of the decoupled active pairs, at the semicanonical
+    energies, has the full RPA's zeroth moment on the active pairs."""
     n = chans[0].active_space.n_act
     occ = [c.active_space.n_act_occ for c in chans]
     spins = BLOCKS[len(chans)]
     vt = [np.zeros((n,) * 4) for _ in spins]
     if not any(0 < k < n for k in occ):
         return vt
-    xpy_a = low.xpy[_join([active_pair_mask(c.active_space) for c in chans])]
+    if any(c.rotation is not None for c in chans):
+        xpy_a = _active_projection(chans).T @ low.xpy
+    else:
+        xpy_a = low.xpy[_join([active_pair_mask(c.active_space)
+                               for c in chans])]
     delta, k_ph, _ = _active_ph(chans, _active_v(low, chans))
     eta0 = cho_factor(xpy_a @ xpy_a.T)
     k_eff = cho_solve(eta0, cho_solve(eta0, np.diag(delta)).T)
@@ -781,7 +871,8 @@ def _active_ov(low, chans):
     particle-hole pair in C order, of both spins stacked for two channels;
     from low.factors or low.eri (casida). Its cost, n^2 naux n_pair with the
     factors, is that of the whole pair space, so it is built only where it
-    is read: the casida W(0) of `static_defect`."""
+    is read: the casida W(0) of `static_defect` and the casida vt of a
+    rotated space (`_residual_screening_from_modes`)."""
     n = chans[0].active_space.n_act
     if low.factors is not None:
         b_ov = _join([_ov_factors(_canonical(c)) for c in chans], axis=1)
