@@ -23,8 +23,13 @@ run_low_level(mf, method, **method_opts)
     qp          False | True: also the one-shot G0W0 QP spectrum of every
                 orbital on the run's W, kept as low.qp
 
-build_effective_hamiltonian(low, active_space, spin_free, **method_opts)
+build_effective_hamiltonian(low, active_space, spin_free, delta,
+                            **method_opts)
     spin_free   True | False: one spatial Hamiltonian, or the spin blocks
+    delta       True | False: on a rotated orbital basis, build the Fock
+                coupling between active and environment orbitals that Delta
+                folds (h.hybridization) | leave it out (DeltaOffWarning);
+                nothing to build for canonical orbitals
     screening   'crpa' | 'bare' | 'crpa_ph' | 'mrpa': cRPA W^r | the bare v
                 | W^r on the particle-hole elements only | Scott and Booth's
                 moment-conserving interaction (casida only)
@@ -39,8 +44,9 @@ build_effective_hamiltonian(low, active_space, spin_free, **method_opts)
                 (srg_s, pole_margin, continuation_margin) replaces the run's
 
 The general layer (low_level.py, spin.py, core.py, double_counting.py,
-zero_body.py, one_body.py, two_body.py and the driver
-effective_hamiltonian.py) knows no method; each low-level method is one file
+zero_body.py, one_body.py, two_body.py, hybridization.py (the Fock coupling
+a rotated orbital basis creates between active and environment orbitals)
+and the driver effective_hamiltonian.py) knows no method; each low-level method is one file
 under methods/ and hands the general layer a `DownfoldingTerms`
 (low_level.py), the only seam between the two. The driver reaches the
 methods through the `LOW_LEVEL` registry of methods/__init__.py. The

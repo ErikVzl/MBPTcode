@@ -135,7 +135,10 @@ src/EffectiveHamiltonian/
     Downfolding/               static effective Hamiltonians of an active
                                space downfolded from HF or RPA (see
                                methods/downfolding.md); builds on
-                               LinearResponse and GW
+                               LinearResponse and GW; hybridization.py:
+                               the Fock coupling a rotated orbital basis
+                               creates between active and environment
+                               orbitals, the term Delta folds
 src/fragments/                 fragment-localized orbitals and the fragment
                                partition of any Hermitian singles operator
                                (GW-BSE, ADC(2): diabats, A_eff(Omega_0)),

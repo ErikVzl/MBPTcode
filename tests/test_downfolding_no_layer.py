@@ -18,6 +18,8 @@ from src.Base.numerics.constants import (DOWNFOLDING_NO_CUT_WARN,
 from src.Base.numerics.numerics import Numerics, NumericsMismatch
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
+from src.EffectiveHamiltonian.Downfolding.hybridization import (
+    DeltaOffWarning)
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.EffectiveHamiltonian.active_space import (ActiveSpace,
                                                    NearDegenerateCutWarning,
@@ -61,10 +63,10 @@ def _with_occupations(space, changes):
 
 
 def test_hf_method_is_casci_on_the_rotated_orbitals(mf, low, low_hf):
-    # from Task 6 on a rotated basis gets Delta by default: Task 6 changes
-    # this test to build with delta=False
+    # a rotated basis gets Delta by default: CASCI is the static Hamiltonian
     space = no_space(low, 2, 2)
-    h = build_effective_hamiltonian(low_hf, space)
+    with pytest.warns(DeltaOffWarning):
+        h = build_effective_hamiltonian(low_hf, space, delta=False)
     T, _ = semicanonical_rotation(space.basis, space, low.eps)
     order = list(space.env_occ) + list(space.act) + list(space.env_virt)
     ref = mcscf.CASCI(mf, 4, 4).kernel((mf.mo_coeff @ T)[:, order])[0]
@@ -137,7 +139,12 @@ def test_degenerate_occupation_cut_is_refused(low, low_hf):
         build_effective_hamiltonian(low_hf, space)
 
 
+@pytest.mark.filterwarnings(
+    'ignore::src.EffectiveHamiltonian.Downfolding.hybridization.'
+    'DeltaOffWarning')
 def test_near_degenerate_cut_warns_and_runs(low):
+    # a rotated occupied block is refused with Delta on until Task 13: those
+    # spaces are built with delta=False
     nocc = low.nocc
     virt = no_space(low, 2, 2)
     occ = no_space(low, 2, 2, rotate_occupied=True)
@@ -149,20 +156,25 @@ def test_near_degenerate_cut_warns_and_runs(low):
                                     ('1.9589', '1.9601'))):
         with pytest.warns(NearDegenerateCutWarning,
                           match=f'{a}.*{b}'):
-            h = build_effective_hamiltonian(low, space, screening='bare')
+            h = build_effective_hamiltonian(
+                low, space, screening='bare',
+                delta=not space.basis.rotates_occupied)
         assert 'no_cut_near_degenerate' in _flags(h)
         assert np.isfinite(h.g_eff[0])
         # a smaller no_cut_warn lets the same cut through without a word
         quiet = Numerics(downfolding={'no_cut_warn': 1e-3})
         with warnings.catch_warnings():
             warnings.simplefilter('error', NearDegenerateCutWarning)
-            h = build_effective_hamiltonian(low, space, screening='bare',
-                                            numerics=quiet)
+            h = build_effective_hamiltonian(
+                low, space, screening='bare', numerics=quiet,
+                delta=not space.basis.rotates_occupied)
         assert 'no_cut_near_degenerate' not in _flags(h)
     for space in apart:
         with warnings.catch_warnings():
             warnings.simplefilter('error', NearDegenerateCutWarning)
-            h = build_effective_hamiltonian(low, space, screening='bare')
+            h = build_effective_hamiltonian(
+                low, space, screening='bare',
+                delta=not space.basis.rotates_occupied)
         assert 'no_cut_near_degenerate' not in _flags(h)
     assert Numerics().downfolding.no_cut_warn == DOWNFOLDING_NO_CUT_WARN
 

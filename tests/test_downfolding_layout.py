@@ -22,7 +22,7 @@ from src.Base.utils.choices import require_choice
 PACKAGE = (pathlib.Path(__file__).resolve().parent.parent
            / 'src' / 'EffectiveHamiltonian' / 'Downfolding')
 GENERAL = ['low_level', 'spin', 'core', 'double_counting', 'zero_body',
-           'one_body', 'two_body']
+           'one_body', 'two_body', 'hybridization']
 KERNELS = ('src.SingleReference.LinearResponse', 'src.SingleReference.GW')
 METHODS = 'src.EffectiveHamiltonian.Downfolding.methods'
 FORBIDDEN = KERNELS + (METHODS,)

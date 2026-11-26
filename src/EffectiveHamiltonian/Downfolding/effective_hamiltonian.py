@@ -27,11 +27,12 @@ them up: E_0 in zero_body.py, h_eff in one_body.py, v_eff in two_body.py.
 read (src/EffectiveHamiltonian/solvers/solve.py).
 """
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from pyscf import scf
 
-from src.Base.numerical_flags import collecting, gathered
+from src.Base.numerical_flags import collecting, flag, gathered
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.orbital_spaces import closed_shell_nocc, unrestricted_nocc
 from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
@@ -50,6 +51,8 @@ from src.EffectiveHamiltonian.solvers.solve import solve
 
 from .core import core_terms
 from .double_counting import double_counting
+from .hybridization import (DEFAULT_BLOCKS, Coupling, DeltaOffWarning,
+                            fock_coupling)
 from .methods import LOW_LEVEL
 from .one_body import effective_one_body
 from .spin import SPINS
@@ -177,12 +180,28 @@ def _require_basis_route(low, spaces):
 
 
 def _rotated_orbitals(mo, eps, spaces):
-    """The orbitals of each channel in the basis of its active space: the
-    canonical `mo` itself for a space without a basis, else mo @ T with T
-    the semicanonical rotation of the basis (`semicanonical_rotation`)."""
-    return tuple(c if s.basis is None
-                 else c @ semicanonical_rotation(s.basis, s, e)[0]
-                 for c, e, s in zip(mo, eps, spaces))
+    """(mo, T): the orbitals of each channel in the basis of its active
+    space, the canonical `mo` itself for a space without a basis, else
+    mo @ T with T the semicanonical rotation of the basis
+    (`semicanonical_rotation`); and T, None for a space without a basis."""
+    rotations = tuple(None if s.basis is None
+                      else semicanonical_rotation(s.basis, s, e)[0]
+                      for e, s in zip(eps, spaces))
+    return (tuple(c if t is None else c @ t for c, t in zip(mo, rotations)),
+            rotations)
+
+
+def _require_delta_route(spaces, delta):
+    """Refuse, with Delta on, a space whose occupied block is rotated: the
+    E_0 term of the hybridization would hold the hole side, which Delta does
+    not fold yet (NotImplementedError, Task 13)."""
+    if delta and any(s.basis is not None and s.basis.rotates_occupied
+                     for s in spaces):
+        raise NotImplementedError(
+            'an active space whose occupied block is rotated '
+            '(rotate_occupied=True) with Delta on: the hole side of Delta '
+            'is not built yet (Task 13). delta=False gives the static '
+            'Hamiltonian only.')
 
 
 @dataclass(frozen=True, eq=False)
@@ -196,13 +215,18 @@ class DownfoldedHamiltonian:
         term of E_0. diagnostics: the low-level method's checks, keyed by
         name. numerical_flags: the named flags behind this Hamiltonian
         (src.Base.numerical_flags), each {'flag': name, 'message': text};
-        empty for a clean result.
+        empty for a clean result. hybridization: the Fock coupling
+        (`Coupling`, hybridization.py) between the active and the
+        environment orbitals of an active space on a rotated orbital basis,
+        the term Delta folds; None for canonical orbitals and with
+        delta=False.
     """
     g_eff: dict
     space: dict
     energies: Energies
     diagnostics: dict
     numerical_flags: list
+    hybridization: Optional[Coupling] = None
 
     def solve(self, solver, **kwargs):
         """The lowest energies of this Hamiltonian by `solver`
@@ -268,7 +292,8 @@ def run_low_level(mf, method='rpa', **method_opts):
 
 
 def build_effective_hamiltonian(low, active_space, spin_free=True,
-                                numerics=None, **method_opts):
+                                numerics=None, delta=True, _blocks=None,
+                                **method_opts):
     """The `DownfoldedHamiltonian` of `active_space`, downfolded from the
     low-level result `low`: g_eff, space, energies, diagnostics and
     numerical_flags. `h.solve(solver)` solves it.
@@ -320,6 +345,20 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     NotImplementedError), and, not yet, an unrestricted reference with a
     basis (NotImplementedError).
 
+    delta: True | False. On a rotated orbital basis the rotation couples
+    active and environment orbitals; with delta=True, the default, that
+    Fock coupling is built (`fock_coupling`, hybridization.py) as
+    h.hybridization, the term Delta folds, with its norms in
+    diagnostics['fock_coupling'] = {'folded': the norm of each coupling
+    block, 'left_out': the norms of what Delta does not fold, Sigma_x - v_xc
+    on a reference that is not HF}. delta=False leaves it out: the result
+    is the static Hamiltonian only, with DeltaOffWarning and the flag
+    'delta_off'. Until Task 13 a space whose occupied block is rotated is
+    refused with Delta on (NotImplementedError). For canonical orbitals the
+    coupling is identically zero: nothing is built, hybridization is None
+    and there is no 'fock_coupling' entry, whatever `delta` is. _blocks
+    (tests only) replaces DEFAULT_BLOCKS, the blocks the coupling folds.
+
     `numerical_flags` lists every named flag behind this
     Hamiltonian (src.Base.numerical_flags): those of the low-level run
     (`low.numerical_flags`) and those raised while building it, each
@@ -335,9 +374,11 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     with collecting(flags):
         spaces = _active_spaces(active_space, mo, eps, nocc, settings)
         _require_basis_route(low, spaces)
+        _require_delta_route(spaces, delta)
+        rotated = any(s.basis is not None for s in spaces)
         unrestricted = len(spaces) == 2
         method = require_choice(low.method, tuple(LOW_LEVEL), 'method')
-        mo = _rotated_orbitals(mo, eps, spaces)
+        mo, rotations = _rotated_orbitals(mo, eps, spaces)
         # `downfold` is called from this function itself, not from a helper:
         # the method's warnings count the frames up to the caller of this one
         terms = LOW_LEVEL[method].downfold(
@@ -352,11 +393,30 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
             mol, tuple(c[:, s.act] for c, s in zip(mo, spaces)), terms.vtilde)
         energies = assemble_energies(mf.energy_nuc(), core, dc, terms)
         g_eff = pack(h_eff, v_eff, energies.e0, spin_free)
+        diagnostics = dict(terms.diagnostics)
+        coupling = None
+        if rotated and delta:
+            # one channel: an unrestricted reference with a basis is refused
+            # above (_require_basis_route)
+            coupling = fock_coupling(
+                mf, mo[0], rotations[0], eps[0], spaces[0],
+                blocks=DEFAULT_BLOCKS if _blocks is None else _blocks)
+            diagnostics['fock_coupling'] = {'folded': coupling.norms,
+                                            'left_out': coupling.left_out}
+        elif rotated:
+            # stacklevel 2: the caller of build_effective_hamiltonian
+            flag('delta_off',
+                 'an active space on a rotated orbital basis built with '
+                 'delta=False: the Fock coupling the rotation creates '
+                 'between the active and the environment orbitals is left '
+                 'out, and the result is the static Hamiltonian only.',
+                 DeltaOffWarning)
     inherited = list(getattr(low, 'numerical_flags', ()))
     return DownfoldedHamiltonian(
         g_eff=g_eff, space=_space(mf, mo, spaces, spin_free),
-        energies=energies, diagnostics=dict(terms.diagnostics),
-        numerical_flags=gathered(inherited + flags))
+        energies=energies, diagnostics=diagnostics,
+        numerical_flags=gathered(inherited + flags),
+        hybridization=coupling)
 
 
 def _check_terms(terms, method, unrestricted):
