@@ -209,9 +209,6 @@ def test_foreign_basis_is_refused(low):
 @pytest.mark.parametrize('kwargs,error,match', [
     (dict(sigma='srg', sigma_energies='qp'), NotImplementedError,
      "sigma_energies='qp'"),
-    (dict(screening='bare', sigma='srg'), NotImplementedError, 'Task 5'),
-    (dict(screening='bare', sigma='averaged'), NotImplementedError,
-     'Task 5'),
 ])
 def test_refused_with_a_basis(low, kwargs, error, match):
     with pytest.raises(error, match=match):

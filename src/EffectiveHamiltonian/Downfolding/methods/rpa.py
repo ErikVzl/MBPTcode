@@ -395,11 +395,11 @@ def downfold(low, active_space, screening='crpa', sigma=None,
 
     An ActiveSpace with an orbital basis gets the rotated spin channel
     (`_channels`): E_c^A on the semicanonical active pairs and the rotated
-    v. 'qp_energies' is left out, and sigma_energies='qp' refused
+    v, and Sigma_bar^E on the rotated active and environment orbitals at
+    their semicanonical energies (`environment_self_energy`).
+    'qp_energies' is left out, and sigma_energies='qp' refused
     (NotImplementedError): the QP energies are those of the canonical
-    orbitals. Every screening is built on casida (`screening_correction`);
-    not built yet, and refused (NotImplementedError): every screening but
-    'bare' on imagfrequency and space-time, and every sigma but None.
+    orbitals. The screening on a rotated basis is `screening_correction`'s.
     """
     _refuse_options(opts, 'downfold')
     low = _with_settings(low, numerics)
@@ -416,7 +416,7 @@ def downfold(low, active_space, screening='crpa', sigma=None,
             f"'averaged'.")
     rotated = any(p.basis is not None for p in channels_of(active_space))
     if rotated:
-        _refuse_with_a_basis(sigma, sigma_energies)
+        _refuse_qp_with_a_basis(sigma_energies)
     chans = _channels(low, active_space)
     vt = _two_body_blocks(screening_correction(low, active_space, screening),
                           chans)
@@ -453,20 +453,16 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         e_c_active=e_c_active, dc=dc, diagnostics=recorded)
 
 
-def _refuse_with_a_basis(sigma, sigma_energies):
-    """Refuse (NotImplementedError) what `downfold` does not do on an active
-    space with an orbital basis: the QP energies, which belong to the
-    canonical orbitals, and, not yet, Sigma^E. The screening refuses what
-    is not built yet itself (`screening_correction`)."""
+def _refuse_qp_with_a_basis(sigma_energies):
+    """Refuse (NotImplementedError) sigma_energies='qp' on an active space
+    with an orbital basis: the QP energies belong to the canonical orbitals.
+    Called by `downfold` before anything is built, and where the active
+    energies are read (`_active_energies`) for the other entry points."""
     if sigma_energies == 'qp':
         raise NotImplementedError(
             f"method={METHOD!r} sigma_energies='qp' takes the QP energies of "
             f"the canonical orbitals; an active space on a rotated orbital "
             f"basis has none. Use sigma_energies='mf'.")
-    if sigma is not None:
-        raise NotImplementedError(
-            f"method={METHOD!r} sigma={sigma!r} on a rotated orbital basis is "
-            f"not built yet (Task 5); sigma=None is.")
 
 
 # ---------------------------------------- 1. the screening correction (vtilde)
@@ -1260,6 +1256,16 @@ def environment_self_energy(low, active_space, sigma, numerics=None,
     orbitals, that spin's orbital energies, and the Omega_n of the two-spin
     RPA, which both spins share. One sigma and one srg_s serve both.
 
+    On an active space with an orbital basis (natural orbitals) the same
+    formulas run in the semicanonical orbitals of that basis
+    (`semicanonical_rotation`): t, u the rotated active orbitals at eps_sc,
+    r the rotated environment orbitals with the propagator at eps_sc[env],
+    the residues between them (`screened_residues`) and, off casida, the
+    rotated factors between them; the excitations Omega_n, W and the
+    mid-gap of the samples are the run's, of the canonical orbitals. The
+    pole checks run on eps_sc. sigma_energies='qp' is refused
+    (NotImplementedError): the QP energies are the canonical orbitals'.
+
     numerics: None, or a Numerics whose downfolding section (srg_s,
         pole_margin, continuation_margin) is used here in place of the
         run's; the rest has to be the run's (`_with_settings`).
@@ -1298,9 +1304,13 @@ def _active_energies(low, chans, sigma_energies):
     """The energies eps_t of the active orbitals of each channel at which
     Sigma_bar^E is evaluated: the mean-field ones ('mf'), or the QP energies
     of low.qp ('qp'), refused (ValueError) without them or where an active
-    orbital has no QP root."""
+    orbital has no QP root, and on a rotated channel (NotImplementedError,
+    `_refuse_qp_with_a_basis`). 'mf' on a rotated channel: its
+    semicanonical energies eps_sc."""
     if sigma_energies == 'mf':
         return [c.eps[c.active_space.act] for c in chans]
+    if any(c.rotation is not None for c in chans):
+        _refuse_qp_with_a_basis(sigma_energies)
     if low.qp is None:
         raise ValueError(
             "sigma_energies='qp' needs the QP spectrum of the low-level run:"
@@ -1422,6 +1432,13 @@ def screened_residues(low, active_space, orbitals=None):
     the sum over the stacked pairs of both spins and no further factor: the
     modes are those of the two-spin problem, normalized over both spins.
     The sqrt(2) above is sqrt(g) of the one restricted channel.
+
+    On an active space with an orbital basis t and r are orbitals of its
+    semicanonical basis (`semicanonical_rotation`), `orbitals` index that
+    basis, and (t r| comes from the rotated factors, while (i a) stays
+    the canonical pair of xpy:
+
+        w[n, t, r] = sqrt(2) sum_ia sum_pq T_pt T_qr (p q|i a) xpy_ia,n.
     """
     if low.mode != 'casida':
         raise NotImplementedError(
@@ -1439,15 +1456,23 @@ def screened_residues(low, active_space, orbitals=None):
 
 def _residues(low, chans, orbs):
     """`screened_residues` per channel: one (nexc, n_act, n_r) array for
-    each, between its active orbitals and its index array of `orbs`."""
+    each, between its active orbitals and its index array of `orbs`. The
+    (i a) of the excitations are the canonical pairs of low.xpy, so their
+    factors are the canonical channel's; the (t r| of a rotated channel are
+    its rotated_factors, r indexing the rotated basis."""
     scale, nexc = np.sqrt(spin_weight(chans)), len(low.omega)
     out = []
     if low.factors is not None:
-        rho = _join([_ov_factors(c) for c in chans], axis=1) @ low.xpy
+        rho = _join([_ov_factors(_canonical(c)) for c in chans],
+                    axis=1) @ low.xpy
         for chan, r in zip(chans, orbs):
-            b, act = chan.factors, chan.active_space.act
+            act = chan.active_space.act
             n, m = len(act), len(r)
-            w = rho.T @ b[:, act][:, :, r].reshape(b.shape[0], n * m)
+            if chan.rotation is not None:
+                b = chan.rotated_factors[:, :, r]
+            else:
+                b = chan.factors[:, act][:, :, r]
+            w = rho.T @ b.reshape(b.shape[0], n * m)
             out.append(scale * w.reshape(nexc, n, m))
         return out
     for s, (chan_s, r) in enumerate(zip(chans, orbs)):
@@ -1574,15 +1599,17 @@ def averaged_self_energy(w, eps_t, eps_r, occupied_r, omega):
 def _sigma_continued(low, active_space, chans, sigma, eps_act):
     """The `_SigmaE` of each channel on imagfrequency and space-time, a
     list: S^E on the Pade nodes of the run's numerics (`pade_nodes`, on the
-    line mu + i w, mu the channel's own mid-gap), fitted once per channel
-    and evaluated at eps_act (`_evaluate_continued`). The two routes differ
-    below this, in the samples (`environment_self_energy_samples`)."""
+    line mu + i w, mu the channel's own mid-gap in the run, of its
+    canonical orbitals also when it is rotated, `_mid_gap`), fitted once
+    per channel and evaluated at eps_act (`_evaluate_continued`). The two
+    routes differ below this, in the samples
+    (`environment_self_energy_samples`)."""
     nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
     samples = environment_self_energy_samples(low, active_space, nodes)
     samples = [samples] if len(chans) == 1 else list(samples)
     out = []
     for chan, sampled, e_act in zip(chans, samples, eps_act):
-        z = particle_hole_window(chan.eps, chan.nocc)[2] + 1j * nodes
+        z = _mid_gap(chan) + 1j * nodes
         n, fit = chan.active_space.n_act, None
         if n == 0 or len(chan.active_space.env) == 0:
             s_bar = np.zeros((n, n))
@@ -1619,6 +1646,12 @@ def environment_self_energy_samples(low, active_space, query_freqs):
     pair of each spin's samples is returned: S^{E,s}(mu_s + i w) with that
     spin's factors between its active and environment orbitals, its orbital
     energies and its own mid-gap mu_s, on the one W of both spins.
+
+    On an active space with an orbital basis B[Q, t, r] are the rotated
+    factors between the semicanonical active and environment orbitals
+    (space-time: the rotated collocation X T), and the environment's
+    energies eps_sc[env]; mu stays the run's mid-gap, of the canonical
+    orbitals (`_mid_gap`).
     """
     if low.mode == 'casida':
         raise NotImplementedError(
@@ -1642,13 +1675,15 @@ def environment_self_energy_samples(low, active_space, query_freqs):
         if n == 0 or len(env) == 0:
             out.append(np.zeros((len(query_freqs), n, n), dtype=complex))
             continue
-        mu = particle_hole_window(chan.eps, chan.nocc)[2]
+        mu = _mid_gap(chan)
         if low.mode == 'space-time':
             x, d = chan.collocation, low.cache['factors'][1]
             x_act, x_env = x[:, chan.active_space.act], x[:, env]
             pairs = (x_act[:, :, None]
                      * x_env[:, None, :]).reshape(len(x), -1)
             b = (d.T @ pairs).reshape(d.shape[1], n, len(env))
+        elif chan.rotation is not None:
+            b = chan.rotated_factors[:, :, env]
         else:
             b = chan.factors[:, chan.active_space.act][:, :, env]
         out.append(fitted_self_energy_matrix_imaginary_axis(
@@ -2828,6 +2863,16 @@ def _rotated_channel(chan):
 def _canonical(chan):
     """The unrotated channel of `chan`: `chan` itself when it is canonical."""
     return chan if chan.canonical is None else chan.canonical
+
+
+def _mid_gap(chan):
+    """The mid-gap mu of `chan`'s spin channel in the run, (eps_HOMO +
+    eps_LUMO)/2 of its canonical orbital energies (`_canonical`), the mu
+    of the line mu + i w on which S^E is sampled
+    (`environment_self_energy_samples`); a rotated channel's eps_sc would
+    give another mu."""
+    canonical = _canonical(chan)
+    return particle_hole_window(canonical.eps, canonical.nocc)[2]
 
 
 def _reference_channels(low):
