@@ -734,6 +734,11 @@ def active_polarizability_static(low, active_space):
         return out
     blocks = []
     for chan in chans:
+        if chan.rotation is not None:
+            raise NotImplementedError(
+                f"method={METHOD!r}: P^A(0) of the active pairs of a rotated "
+                f"orbital basis is not built from the canonical factors on "
+                f"mode={low.mode!r} yet (Task 4b).")
         mask = active_pair_mask(chan.active_space)
         canonical = _canonical(chan)
         blocks.append((_ov_factors(canonical)[:, mask],

@@ -229,6 +229,16 @@ def test_screening_of_the_imaginary_axis_waits_for_task_4b(mf):
     build_effective_hamiltonian(low, no_space(low, 2, 2), screening='bare')
 
 
+def test_active_polarizability_of_a_rotated_space_waits_for_task_4b(low):
+    """P^A of the rotated active pairs is not built from the canonical
+    factors: called directly on a rotated casida space it is refused."""
+    with pytest.raises(NotImplementedError, match='Task 4b'):
+        rpa.active_polarizability_static(low, no_space(low, 2, 2))
+    canonical = replace(no_space(low, 2, 2), basis=None)
+    assert rpa.active_polarizability_static(low, canonical).shape == (
+        (low.factors.shape[0],) * 2)
+
+
 def test_exact_integrals_refused(mf, low):
     exact = run_low_level(mf, method='rpa', mode='casida', df=False)
     space = no_space(low, 2, 2)
