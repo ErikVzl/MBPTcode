@@ -236,8 +236,17 @@ def test_a_pair_of_bases(mf, low, pair):
             print(f'spin {s}: largest off-diagonal F in a block {off:.1e}')
             assert off < 1e-10
     # each spin its own rotation; the occupied block kept on request
-    assert not np.array_equal(bases[0].rotation[4:, 4:],
-                              bases[1].rotation[4:, 4:])
+    assert bases[0].digest != bases[1].digest
+    for basis in bases:
+        for block in (slice(None, basis.nocc), slice(basis.nocc, None)):
+            R = basis.rotation[block, block]
+            assert np.abs(R - np.eye(len(R))).max() > 0.1
+    m = min(basis.nocc for basis in bases)
+    assert np.abs(bases[0].rotation[:m, :m]
+                  - bases[1].rotation[:m, :m]).max() > 0.1
+    nv = min(len(b.rotation) - b.nocc for b in bases)
+    assert np.abs(bases[0].rotation[-nv:, -nv:]
+                  - bases[1].rotation[-nv:, -nv:]).max() > 0.1
     for basis in random_basis(low, rotate_occupied=False):
         assert not basis.rotates_occupied and basis.rotates_virtual
 
@@ -584,6 +593,12 @@ def test_closed_shell_limit():
                 errs[field.name] = abs(getattr(got.energies, field.name)
                                        - getattr(want.energies, field.name))
         errs['g_eff[0]'] = abs(got.g_eff[0] - want.g_eff[0])
+        for k in (1, 2):
+            # the restricted result is one array, the unrestricted one a
+            # block per spin pair (h: aa, bb; v: aa, ab, bb)
+            assert isinstance(got.g_eff[k], (tuple, list))
+            assert len(got.g_eff[k]) == k + 1
+            assert all(b.shape == want.g_eff[k].shape for b in got.g_eff[k])
         errs['h'] = max(np.abs(h - want.g_eff[1]).max() for h in got.g_eff[1])
         errs['v'] = max(np.abs(v - want.g_eff[2]).max() for v in got.g_eff[2])
         e_u, e_r = got.solve('pyscf_fci')[0], want.solve('pyscf_fci')[0]
