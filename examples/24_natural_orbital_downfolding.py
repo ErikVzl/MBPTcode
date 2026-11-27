@@ -91,6 +91,10 @@ def solve(h, label, method):
         if 'linearization_error' in out:
             print(f'  {"":12s} estimated linearization error per root (Ha): '
                   + ', '.join(f'{x:.1e}' for x in out['linearization_error']))
+        # 'delta_remainder_large' on T1 is the known false positive of its
+        # 1e-2 Ha heuristic threshold: the lowdin comparison printed next to
+        # it shows the energy is good. The energy in the flag message is
+        # E^A, without the constant (out['e0']), not the total.
         for f in out['numerical_flags']:
             print(f"  {'':12s} flag {f['flag']!r}: {f['message']}")
     return totals
@@ -134,7 +138,8 @@ def main():
     lin = solve(h, 'linearized', 'linearized')
     hs = h.prepare_delta(((2, 0), (1, 2)))   # D_SA from the states solved
     rem = solve(hs, 'sa_remainder', 'sa_remainder')
-    # a flagged root is checked with exact Loewdin, the reference
+    # a flagged root is checked with exact Loewdin, the reference (T1's
+    # 'delta_remainder_large' above is the heuristic's false positive here)
     exact = solve(h, 'lowdin', 'lowdin')
 
     print('\nexcitation energies (eV):   S1 - S0   T1 - S0')

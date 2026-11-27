@@ -91,7 +91,8 @@ class Energies:
     method 'hf', e_c_hybridization is 0.0 and e0, e0_without_delta and
     g_eff[0] are one number, to the bit.
 
-    Neither constant is a total. A total energy comes from h.solve(...),
+    In general neither constant is a total (with nothing active, e0 is the
+    total: the (0,0) space). A total energy comes from h.solve(...),
     which adds the constant of the model whose active energy it computed
     and reports both parts, out['e0'] (the constant added) and
     out['e_active'] (the active energy E^A of each root); E^A is

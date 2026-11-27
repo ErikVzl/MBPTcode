@@ -238,10 +238,12 @@ Three properties give the sums per kind, `eh = e_hartree + e_hartree_dc`,
 `e0 = e_nuc + e_core + eh + ex + ec - e_sigma_trace`. A fifth,
 `e0_without_delta`, is the same sum without `e_c_hybridization`: the
 constant of the active space without Delta, the one `g_eff[0]` holds. With
-Delta off the two are one number, to the bit the E_0 of every run before
-natural orbitals; these are then the `Enuc`, `Ecore`, `Eh`, `Ex`, `Ec`
-columns of the paper's supporting data. Neither is a total energy, and with
-a coupling they differ: [Which constant goes with which
+Delta off the two are one number; for canonical orbitals it is, to the bit,
+the E_0 of every run before natural orbitals. These are then the `Enuc`,
+`Ecore`, `Eh`, `Ex`, `Ec` columns of the paper's supporting data. In
+general neither is a total energy (with nothing active, `e0` is the total,
+see the two limits near the top of this page), and with a coupling they
+differ: [Which constant goes with which
 energy](#which-constant-goes-with-which-energy) says which one a total
 uses.
 
@@ -273,8 +275,9 @@ a record **with a coupling** the same call on `h.g_eff` gives the states of
 the decoupled active space, without Delta, and `h.g_eff[0]` plus their
 energies is the energy of that model, not the total of `h.solve` (rule 4
 of [Which constant goes with which energy](#which-constant-goes-with-which-energy)).
-A solver outside `h.solve` takes `h.static_hamiltonian('static_sa')` (or
-`'static_mf'`) instead, a dict in the layout of `g_eff` whose constant
+A solver outside `h.solve` takes `h.static_hamiltonian('static_sa')`, after
+`h.prepare_delta(...)` has set D_SA (without it the call raises
+`ValueError`), or `h.static_hamiltonian('static_mf')` instead, a dict in the layout of `g_eff` whose constant
 matches its one-body part; the states that the dynamic Delta methods refine
 are not returned.
 
@@ -433,7 +436,9 @@ the basis leaves as the identity (the occupied one with
   energies are diagonalized inside the span of that set
   (`semicanonical_rotation`). The span of the active NOs is kept, their
   rotation inside it is not. h_eff, v, v~ and E_0 are built on these
-  orbitals; `h.space['mo']` and `h.space['basis']` hold them.
+  orbitals; `h.space['mo']` holds the orbital coefficients of the semicanonical
+  orbitals, and `h.space['basis']` the natural-orbital `OrbitalBasis` the
+  active space was made on, not the semicanonical orbitals.
 - **The screening.** With rotated active orbitals the one-body part of the
   RPA couples the active particle-hole pairs to the others, so the residual
   polarizability is not "P minus the active bubble". It is built exactly by
@@ -536,8 +541,8 @@ exact result.
 `h.energies.e0` holds every term; `h.energies.e0_without_delta` all but
 `e_c_hybridization`, and `g_eff[0]` is `e0_without_delta`. The sign of
 dE_c^A is not fixed; on the spaces measured it is negative, so `e0` lies
-above `e0_without_delta`: -0.45 mEh on water/6-31G (NO CAS(2,3)) and
--1.56 mEh on NH3/cc-pVDZ (NO CAS(3,3)) (with the tests of
+above `e0_without_delta`: -0.45 mEh on water/6-31G (NO CAS(4,5), `no_space(low, 2, 3)`) and
+-1.56 mEh on NH3/cc-pVDZ (NO CAS(6,6), `no_space(nh3, 3, 3)`) (with the tests of
 `tests/test_downfolding_no_energy.py` at commit 70e8ef7), -1.31 to -2.75
 mEh on N2/6-31G at 1.1 and 1.6 A (NO CAS(6,5) to CAS(6,8); a run at commit
 7c4bf1b), -0.44 mEh on ethylene/cc-pVDZ (NO CAS(2,2),
@@ -565,8 +570,11 @@ one small complex solve per frequency (E the active pairs on the canonical
 pairs, Lambda the one-body part of the pair space). Replacing 1/d by
 d / (d^2 + w^2) in the static M and Y is wrong (on a random model off by
 0.2 to 0.3 on a scale of 70 at w = 0.7 and 3.0, where the complex form
-agrees with a brute-force solve to 1e-14). Nothing here needs W^r away from
-omega = 0, and none is built.
+agrees with a brute-force solve to 1e-14). In imaginary time the form needs
+the cosine and the sine transform of the tau-loop quantities. On casida the
+extension would go through the full RPA resolvent of the stored modes; that
+is not worked out. Nothing here needs W^r away from omega = 0, and none is
+built.
 
 ### The Delta methods
 
@@ -818,7 +826,7 @@ The ground state of water is weakly coupled (Z close to 1), and
 `'linearized'` is exact there to 1e-10 Ha. Its excited states in these
 spaces are strongly coupled: in the CAS(4,4), Delta lowers the two excited
 states of the tests by 0.31 and 0.37 Ha (`'lowdin'`, commit b54a8ca), their
-Z is 0.72 and 0.63, and `'linearized'` misses `'lowdin'` by 1.6e-3 and
+Z is 0.72 and 0.64, and `'linearized'` misses `'lowdin'` by 1.6e-3 and
 1.7e-2 Ha. Linearized Loewdin
 replaces H_eff(E) by its tangent at its starting point, so its error is
 second order in the coupling for a state with Z close to 1 and grows quickly
@@ -1526,8 +1534,19 @@ not apply to the call is skipped, so one tuple works across a loop. A
 diagnostic that applies but is exactly zero (an empty active space, no
 environment, no particle-hole pair) is recorded as 0.0; one that does not
 apply is absent. Results are in
-`h.diagnostics`, keyed by name. On the casida route two apply; on
-imagfrequency and space-time all four:
+`h.diagnostics`, keyed by name. Which entries appear depends on the route
+and on the call (`method='rpa'`):
+
+- `'static_defect'` is recorded on every route. `'ec_active_casida'` only on
+  imagfrequency and space-time. `'sigma_poles'` on every route, and
+  `'sigma_continuation'` on imagfrequency and space-time, both only with
+  `sigma` set. `'qp_energies'` only when `low.qp` is set (`qp=True`) and the
+  active space is on canonical orbitals (on a rotated basis it is left out).
+- `'fock_coupling'` is not one of the names `diagnostics=` takes: it is
+  recorded whenever the Fock coupling is built (a rotated basis with Delta
+  on), whatever `diagnostics` is.
+
+The entries:
 
 - `'static_defect'`: the largest element of W(0) - W^A[v_eff](0) on the
   active orbitals. On canonical orbitals it is zero for `crpa`, by
