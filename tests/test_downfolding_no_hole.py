@@ -33,7 +33,8 @@ from src.EffectiveHamiltonian.solvers.backends import PyscfFCISolver
 from src.EffectiveHamiltonian.solvers.dynamic_backends import (
     DENSE_MATRICES, DYNAMIC_METHODS, DeltaLinearizationWarning, LowdinSolver)
 from src.EffectiveHamiltonian.solvers.solve import SolveRequest, static_states
-from tests.no_downfolding import nitrogen, no_space, pq_spectrum, water
+from tests.no_downfolding import (PIN_TOL, nitrogen, no_space, pq_spectrum,
+                                  water)
 
 
 def _integrals(h):
@@ -181,7 +182,7 @@ def test_canonical_occupied_has_no_hole_term(low, h_virt):
         again, _, _ = _record(lambda: particle.solve(
             'pyscf_fci', nroots=3, delta_method=method))
         assert np.array_equal(e, again), method
-        assert all(abs(a - float.fromhex(b)) < 1e-10
+        assert all(abs(a - float.fromhex(b)) < PIN_TOL
                    for a, b in zip(e, want)), method
     assert static_mf_delta(cp)[1] == 0.0
 

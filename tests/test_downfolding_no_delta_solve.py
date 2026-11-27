@@ -49,7 +49,8 @@ from src.EffectiveHamiltonian.solvers.dynamic_backends import (
 from src.EffectiveHamiltonian.solvers.solve import (
     ENGINES, EmptyActiveSpaceWarning, SolveRequest, StaticStates, solve,
     static_states)
-from tests.no_downfolding import nitrogen, no_space, pq_spectrum, water
+from tests.no_downfolding import (PIN_TOL, nitrogen, no_space, pq_spectrum,
+                                  water)
 
 CROSSING = ('delta_roots_reordered', 'delta_roots_missing')
 
@@ -503,9 +504,6 @@ PINNED = {
     (3, 2): ['-0x1.2f0c56752a470p+6', '-0x1.2ec6b15e9648ep+6',
              '-0x1.2ea9937fe0a8bp+6'],
 }
-#: absolute tolerance, Ha: bit for bit is the job of the bitwise check on
-#: one machine; another BLAS build moves the last digits (commit 91edcca)
-PIN_TOL = 1e-10
 PINNED_HUBBARD = ['-0x1.2a09e667f3bbap+1', '-0x1.17c9cea19249ep+1',
                   '-0x1.7ffffffffffccp+0']
 

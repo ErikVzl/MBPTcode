@@ -15,7 +15,8 @@ import scipy.linalg
 from pyscf import dft, fci, gto, scf
 from scipy.linalg import block_diag, cho_factor, cho_solve
 
-from src.Base.numerics.constants import DOWNFOLDING_NO_CUT_WARN
+from src.Base.numerics.constants import (DOWNFOLDING_NO_CUT_WARN,
+                                         HARTREE_TO_EV)
 from src.Base.numerics.numerics import Numerics
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.EffectiveHamiltonian.orbital_basis import (OrbitalBasis,
@@ -26,6 +27,24 @@ from tests.gw_density_routes import mean_field as _nh3_mean_field
 
 #: the ISDF grid of the space-time cases
 G1 = Numerics(isdf={'level': 'G1'})
+
+#: absolute tolerance, Ha, of a comparison with energies pinned from an
+#: earlier commit (float.hex): 1e-6 eV, the tolerance commit 91edcca gave
+#: the comparisons that other BLAS builds moved (IMAG_AXIS_TOL_EV of
+#: tests/test_downfolding_qp.py). Bit for bit is the job of the bitwise
+#: check on one machine.
+PIN_TOL = 1e-6 / HARTREE_TO_EV
+
+
+def close_chkfile(mf):
+    """Close pyscf's temporary chkfile of a mean field at the teardown of
+    a fixture. A traceback that outlives the module (a failing test) keeps
+    the fixtures alive; the chkfile is then finalized by a later garbage
+    collection, inside another test, which warns (ResourceWarning) unless it
+    was closed here."""
+    chkfile = getattr(mf, '_chkfile', None)
+    if chkfile is not None:
+        chkfile.close()
 
 
 def water(xc='hf', df=False):

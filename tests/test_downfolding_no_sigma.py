@@ -23,12 +23,15 @@ from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.Downfolding.methods.rpa import (
-    SigmaNearPoleWarning, averaged_self_energy, environment_self_energy,
-    environment_self_energy_samples, screened_residues, srg_self_energy)
+    SigmaContinuationWarning, SigmaNearPoleWarning, averaged_self_energy,
+    environment_self_energy, environment_self_energy_samples,
+    screened_residues, srg_self_energy)
 from src.EffectiveHamiltonian.Downfolding.zero_body import Energies
-from src.EffectiveHamiltonian.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import (ActiveSpace,
+                                                   NearDegenerateCutWarning)
 from src.EffectiveHamiltonian.orbital_basis import semicanonical_rotation
-from tests.no_downfolding import G1, ammonia, no_space, water
+from tests.no_downfolding import (G1, ammonia, close_chkfile, no_space,
+                                  water)
 
 #: the active occupied and virtual counts of the route comparison: water/
 #: 6-31G CAS(4,4) of its NOs (with a third virtual NO, at 1.16 Ha, an active
@@ -42,7 +45,9 @@ RECORDS = ('diagnostics', 'numerical_flags')
 
 @pytest.fixture(scope='module')
 def mf():
-    return water('hf')
+    mf = water('hf')
+    yield mf
+    close_chkfile(mf)
 
 
 @pytest.fixture(scope='module')
@@ -58,7 +63,9 @@ def low_if(mf):
 
 @pytest.fixture(scope='module')
 def nh3():
-    return ammonia('hf')
+    mf = ammonia('hf')
+    yield mf
+    close_chkfile(mf)
 
 
 @pytest.fixture(scope='module')
@@ -140,6 +147,9 @@ def test_numerical_routes_follow_casida(request, mode, sigma):
         # a space inside the pole-free window by more than the
         # continuation margin
         warnings.simplefilter('error', SigmaNearPoleWarning)
+        # the spread of the two Pade fits on space-time (docstring) is an
+        # indicator, compared here with the error itself
+        warnings.simplefilter('ignore', SigmaContinuationWarning)
         got = environment_self_energy(num, space, sigma, numerics=settings)
     want = environment_self_energy(cas, space, sigma,
                                    numerics=Numerics(downfolding=INFINITE_S))
@@ -196,7 +206,10 @@ def test_energies_with_sigma_are_finite_and_flagged_near_poles(low):
     space = ActiveSpace.from_indices(norb, nocc, [nocc - 2, nocc - 1],
                                      [nocc, high], basis=basis)
     _, eps_sc = semicanonical_rotation(space.basis, space, low.eps)
-    with pytest.warns(SigmaNearPoleWarning) as rec:
+    # the high NO is active and the NOs between it and the first are not:
+    # the build's cut check warns of cuts between close occupations
+    with pytest.warns(NearDegenerateCutWarning), \
+            pytest.warns(SigmaNearPoleWarning) as rec:
         ham = build_effective_hamiltonian(low, space, sigma='averaged')
     text = str([r.message for r in rec
                 if r.category is SigmaNearPoleWarning][0])

@@ -43,8 +43,8 @@ from src.EffectiveHamiltonian.solvers.dynamic_backends import (
     DYNAMIC_METHODS, DeltaNearPoleWarning, DeltaRemainderWarning,
     LowdinSolver, RemainderSolver, removal_spectrum)
 from src.EffectiveHamiltonian.solvers.solve import solve
-from tests.no_downfolding import (benzene, benzene_pi_space, nitrogen,
-                                  no_space, water)
+from tests.no_downfolding import (benzene, benzene_pi_space, close_chkfile,
+                                  nitrogen, no_space, water)
 
 #: the states D_SA is built from, declared together: three singlets and
 #: two triplets
@@ -80,16 +80,6 @@ def _record(call):
             {w.category for w in caught})
 
 
-def _close_chkfile(mf):
-    """Close pyscf's temporary chkfile of a mean field at the teardown of
-    a fixture. A traceback that outlives the module (a failing test) keeps
-    the fixtures alive; the chkfile is then finalized by the last garbage
-    collection, which warns (ResourceWarning) unless it was closed here."""
-    chkfile = getattr(mf, '_chkfile', None)
-    if chkfile is not None:
-        chkfile.close()
-
-
 @pytest.fixture(scope='module')
 def lows():
     """The NO RPA runs of water: RHF, and PBE0."""
@@ -99,7 +89,7 @@ def lows():
                                  natural_orbitals=True)}
     yield out
     for low in out.values():
-        _close_chkfile(low.mf)
+        close_chkfile(low.mf)
 
 
 @pytest.fixture(scope='module')
@@ -148,7 +138,7 @@ def weak():
     out['benzene', False] = h, h.prepare_delta(BENZENE_STATES)
     yield out
     for low in lows:
-        _close_chkfile(low.mf)
+        close_chkfile(low.mf)
 
 
 def _compare(h, hs, requests, label, messages=None):
