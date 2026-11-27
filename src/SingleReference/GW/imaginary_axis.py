@@ -76,9 +76,37 @@ def screened_pair_weights(df_coeff, W):
     """w^m_pq(i w') = sum_PQ B_P,pm (W - I)_PQ B_Q,qm, as (nmo, nmo, nmo)
     indexed [m, p, q]: the full-matrix weight of the GW convolution at one
     W-grid point (`self_energy_diagonal_imaginary_axis` takes its diagonal p = q)."""
+    df_coeff = np.asarray(df_coeff)
+    WC = _screened_coefficients(df_coeff, W)
+    return np.concatenate([w for _, w in _pair_weight_blocks(df_coeff, WC)])
+
+
+def _screened_coefficients(df_coeff, W):
+    """(W - I) B, B[P, p, m] = df_coeff, as an array of the shape of B."""
     flat = df_coeff.reshape(df_coeff.shape[0], -1)
-    WC = (W @ flat - flat).reshape(df_coeff.shape)
-    return np.einsum('Ppm,Pqm->mpq', df_coeff, WC, optimize=True)
+    wc = W @ flat
+    wc -= flat              # in place: one array of the size of B, not two
+    return wc.reshape(df_coeff.shape)
+
+
+# the most bytes of B (and as many of (W - I) B) that `_pair_weight_blocks`
+# copies at once
+PAIR_WEIGHT_BLOCK_BYTES = 1e9
+
+
+def _pair_weight_blocks(df_coeff, WC):
+    """Yields (slice of m, w[m, p, q]) of `screened_pair_weights` block by
+    block over m: one GEMM per m, sum_P B[P, p, m] WC[P, q, m], as a batched
+    matmul on contiguous copies (BLAS, threaded; einsum with m in both
+    operands and in the output runs it on one core, without BLAS). A block
+    copies at most PAIR_WEIGHT_BLOCK_BYTES of B and of WC."""
+    naux, nrow, nmo = df_coeff.shape
+    size = max(1, int(PAIR_WEIGHT_BLOCK_BYTES // (8 * max(1, naux * nrow))))
+    for m0 in range(0, nmo, size):
+        m = slice(m0, min(nmo, m0 + size))
+        a = np.ascontiguousarray(df_coeff[:, :, m].transpose(2, 1, 0))
+        b = np.ascontiguousarray(WC[:, :, m].transpose(2, 0, 1))
+        yield m, np.matmul(a, b)
 
 
 def lorentzian_fit_matrix(freq_points, poles, tikhonov):
@@ -124,11 +152,19 @@ def fitted_self_energy_matrix_imaginary_axis(df_coeff, eps_mu, freq_points, W_gr
     nmo = df_coeff.shape[1]
     P = lorentzian_fit_matrix(freq_points, poles, tikhonov)
     M = np.einsum('lk,qlm->kqm', P, one_pole_convolution(eps_mu, poles, query_freqs))
-    sigma = np.zeros((M.shape[1], nmo, nmo), dtype=complex)
+    nq = M.shape[1]
+    sigma_re = np.zeros((nq, nmo * nmo))
+    sigma_im = np.zeros((nq, nmo * nmo))
     for k in range(len(freq_points)):
-        sigma += np.einsum('qm,mpr->qpr', M[k], screened_pair_weights(df_coeff, W_grid[k]),
-                           optimize=True)
-    return sigma
+        # sum_m M[k][q, m] w^m_pr, streamed over blocks of m, so the nmo^3
+        # array w is never held whole; two real GEMMs per block
+        WC = _screened_coefficients(df_coeff, W_grid[k])
+        for m, w in _pair_weight_blocks(df_coeff, WC):
+            w = w.reshape(w.shape[0], -1)
+            sigma_re += M[k][:, m].real @ w
+            sigma_im += M[k][:, m].imag @ w
+        del WC
+    return (sigma_re + 1j * sigma_im).reshape(nq, nmo, nmo)
 
 
 def screening_fit_grid(eps, nocc, numerics=None):
