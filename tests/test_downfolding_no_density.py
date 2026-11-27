@@ -2,12 +2,15 @@
 with natural_orbitals=True: the blocks of the unrelaxed density of
 `compute_gw_density_matrix` on the same route, in the canonical MO basis.
 casida takes the run's own eigenvectors (no second eigensolve); the two
-imaginary-axis routes agree with it to their quadrature error."""
+imaginary-axis routes agree with it to their quadrature error. A run on
+the exact four-centre integrals (df=False) is refused: a build on natural
+orbitals needs three-index factors."""
 import numpy as np
 import pytest
 from pyscf import scf
 
 from src.EffectiveHamiltonian.Downfolding import run_low_level
+from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.SingleReference.GW.density_matrix import compute_gw_density_matrix
 from tests.no_downfolding import G1, ammonia, water
 
@@ -25,17 +28,18 @@ def test_blocks_are_those_of_the_gw_density(xc):
     assert abs(low.natural.ov_fro - np.linalg.norm(g[:nocc, nocc:])) < 1e-10
 
 
-def test_exact_integrals_casida():
-    """df=False: the blocks of the four-centre run, on an exact mean field."""
-    mf = water('hf')
-    low = run_low_level(mf, method='rpa', mode='casida', df=False,
-                        natural_orbitals=True)
-    dm = compute_gw_density_matrix(mf, mode='casida', relaxation='none',
-                                   df=False)
-    c, s, nocc = mf.mo_coeff, mf.get_ovlp(), low.nocc
-    g = c.T @ s @ dm @ s @ c
-    assert np.abs(low.natural.gamma_oo - g[:nocc, :nocc]).max() < 1e-10
-    assert np.abs(low.natural.gamma_vv - g[nocc:, nocc:]).max() < 1e-10
+def test_exact_integrals_are_refused(monkeypatch):
+    """df=False with natural_orbitals=True is refused by the run, before
+    the RPA is solved (NotImplementedError naming the three-index factors):
+    every build on its natural orbitals would be refused for the lack of
+    them."""
+    def ran(*args, **kwargs):
+        raise AssertionError('the RPA ran before the refusal')
+    monkeypatch.setattr(rpa, '_casida_fields', ran)
+    with pytest.raises(NotImplementedError,
+                       match='natural_orbitals=True.*df=False.*three-index'):
+        run_low_level(water('hf'), method='rpa', mode='casida', df=False,
+                      natural_orbitals=True)
 
 
 def test_signs_and_traces():

@@ -27,12 +27,17 @@ The fields:
     solvent     the continuum, by label, the fold, and the self-consistent
                 solvation loop's convergence
     walk        the geometry optimizer and the finite-difference steps
-    layout      memory and tiling: recorded, not in the identity
+    layout      memory and tiling: recorded, not in the identity (the
+                memory limit of the dense Delta methods of the downfolding
+                among them)
     adc         the excitation-energy ADC solve of a state model
     properties  the spin-orbit operator of the properties pass
     downfolding the static environment self-energy of the RPA downfolding,
-                and the warning on the cut of an active space through a
-                rotated orbital basis
+                the warning on the cut of an active space through a
+                rotated orbital basis, and Delta, the folding of the
+                coupling a rotated basis creates (its poles, convergence,
+                degenerate sets, linearization warning, state-averaged
+                form, block Lanczos and remainder warning)
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
@@ -620,9 +625,12 @@ class DownfoldingNumerics:
     1e-2). The correction is first order in Delta - D_SA; a large one
     indicates that D_SA, evaluated at energies without Delta, was far from
     Delta at that state and may have changed the state itself, which the
-    correction cannot undo: the coupling is strong there, and 'lowdin' or
+    correction cannot undo, or that the correction is too large for one
+    first-order step: the coupling is strong there, and 'lowdin' or
     'linearized' gives the energy-dependent result where it fits. The
-    threshold is a heuristic, not a proof that a flagged energy is wrong.
+    threshold is a conservative heuristic with known false positives (the
+    comment of DOWNFOLDING_DELTA_REMAINDER_WARN), not a proof that a
+    flagged energy is wrong.
 
     Refused when built: srg_s that is not a finite positive number or None,
     a negative pole_margin, continuation_margin, no_cut_warn,

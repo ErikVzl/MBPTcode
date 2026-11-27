@@ -280,6 +280,37 @@ def test_no_active_pair_gives_zero(low, counts):
     assert h.energies.e0 == h.energies.e0_without_delta == h.g_eff[0]
 
 
+@pytest.mark.parametrize('route', ['casida', 'imagfrequency'])
+def test_no_active_occupied_through_the_solve(route, low, low_if):
+    """Review Focus 1 through build and solve: both blocks rotated, two
+    virtual NOs active and no active occupied orbital (no active
+    electron), cRPA, on casida and imagfrequency. Nothing hybridizes
+    (e_c_hybridization 0.0, e0 = e0_without_delta); the particle side is
+    folded, and Delta 'linearized' (the default) and 'sa_remainder' after
+    prepare_delta give finite energies; no warning and no flag on the
+    build or on either solve."""
+    run = {'casida': low, 'imagfrequency': low_if}[route]
+    space = no_space(low, 0, 2, rotate_occupied=True)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        h = build_effective_hamiltonian(run, space, screening='crpa')
+        out = {}
+        e = h.solve('pyscf_fci', out=out)
+        hs = h.prepare_delta(((1, 0),))
+        out_r = {}
+        e_r = hs.solve('pyscf_fci', delta_method='sa_remainder', out=out_r)
+    print(f'{route}: linearized {e[0]:.10f}, sa_remainder {e_r[0]:.10f}, '
+          f'e0 {h.energies.e0:.10f}')
+    assert [str(w.message) for w in caught] == []
+    assert h.energies.e_c_hybridization == 0.0
+    assert h.energies.e0 == h.energies.e0_without_delta
+    assert [kind for kind, _, _, _ in h.hybridization.sides()] == ['particle']
+    assert np.all(np.isfinite(e)) and np.all(np.isfinite(e_r))
+    assert np.all(np.isfinite(out['z'])) and np.all(np.isfinite(out_r['z']))
+    assert h.numerical_flags == []
+    assert out['numerical_flags'] == [] and out_r['numerical_flags'] == []
+
+
 def test_e0_holds_every_term_and_g_eff_the_static_constant(low):
     """With Delta on, e0 has every term and g_eff[0] is e0_without_delta,
     the constant of the decoupled model; with canonical orbitals the three

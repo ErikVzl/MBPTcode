@@ -31,7 +31,8 @@ is added to it, so that nothing is counted twice, and there are two models
 dE_c^A is `Energies.e_c_hybridization`. It is 0.0, not computed, whenever
 no coupling is built (canonical orbitals, delta=False), and 0.0 for method
 'hf', which has no correlation energy; then the two constants are one
-number; for canonical orbitals it is, to the bit, today's E_0 (on a rotated
+number; for canonical orbitals it is, to the bit, the E_0 of the
+downfolding before natural orbitals existed (on a rotated
 orbital basis with delta=False the orbitals differ, so it is the E_0 of
 that basis, not of a canonical run). A total energy adds `e0` to an active
 energy with Delta and `e0_without_delta` (= g_eff[0]) to one without; any

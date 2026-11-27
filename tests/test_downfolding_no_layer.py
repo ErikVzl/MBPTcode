@@ -291,3 +291,15 @@ def test_settings_of_the_build(low, low_hf):
     with pytest.raises(TypeError, match='takes no options'):
         low_hf.settings(own)
 
+
+
+@pytest.mark.parametrize('delta', ['no', 'False', 0, 1, None])
+def test_delta_must_be_a_bool(low, delta):
+    """delta is True or False: anything else is refused (TypeError) on a
+    rotated basis and on canonical orbitals alike, where a string such as
+    'no' would otherwise be true and build the coupling."""
+    norb = low.mf.mo_coeff.shape[1]
+    for space in (no_space(low, 2, 2),
+                  ActiveSpace.from_indices(norb, 5, [3, 4], [5, 6])):
+        with pytest.raises(TypeError, match='delta'):
+            build_effective_hamiltonian(low, space, delta=delta)

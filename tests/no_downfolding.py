@@ -29,10 +29,12 @@ from tests.gw_density_routes import mean_field as _nh3_mean_field
 G1 = Numerics(isdf={'level': 'G1'})
 
 #: absolute tolerance, Ha, of a comparison with energies pinned from an
-#: earlier commit (float.hex): 1e-6 eV, the tolerance commit 91edcca gave
-#: the comparisons that other BLAS builds moved (IMAG_AXIS_TOL_EV of
-#: tests/test_downfolding_qp.py). Bit for bit is the job of the bitwise
-#: check on one machine.
+#: earlier commit (float.hex): 1e-6 eV. Commit 91edcca gave this tolerance
+#: (IMAG_AXIS_TOL_EV of tests/test_downfolding_qp.py) to comparisons of
+#: root-finder results, the imaginary-axis QP spectrum against
+#: calc_qp_energy, which other BLAS builds moved; it is applied here for the
+#: same reason, BLAS differences, to another quantity, the pinned energies.
+#: Bit for bit is the job of the bitwise check on one machine.
 PIN_TOL = 1e-6 / HARTREE_TO_EV
 
 

@@ -92,10 +92,12 @@ Green's functions by Lanczos, as one Z-renormalized step
 E_K + r_K / (1 - r'_K). It does not relax the states. Its limit is strong
 coupling: when Delta shifts a state by an amount comparable to the
 distance between its removal and attachment energies and the environment
-levels, D_SA overshoots and changes the states of h + D themselves, and
-the scalar cannot undo that; a correction above
-numerics.downfolding.delta_remainder_warn, a heuristic sign of that regime,
-is flagged 'delta_remainder_large' (DeltaRemainderWarning). It flags
+levels, D_SA overshoots and can change the states of h + D themselves,
+which the scalar cannot undo, or the correction is too large for one
+first-order step; a correction above
+numerics.downfolding.delta_remainder_warn, a conservative heuristic sign
+of that regime with known false positives, is flagged
+'delta_remainder_large' (DeltaRemainderWarning). It flags
 'delta_near_pole' and 'delta_satellite' as the dense methods do, reports in
 extra['lanczos_change'] the change of each correction from one Lanczos
 block less, and counts no solutions below a root (it forms no H_eff(E)),
@@ -160,11 +162,12 @@ class DeltaRemainderWarning(RuntimeWarning):
     Delta - D_SA, and a large one indicates strong coupling, where D_SA,
     evaluated at the energies of the states without Delta, can overshoot
     and change the states of h + D themselves, which a per-state scalar
-    cannot undo, so that the energy can be far from exact Loewdin. The
-    threshold is a heuristic: a flagged state is not proven wrong, nor an
-    unflagged one right. 'lowdin' or 'linearized' gives the
-    energy-dependent result where the active space fits their memory
-    limit."""
+    cannot undo, or where the correction is too large for one first-order
+    step, so that the energy can be far from exact Loewdin. The threshold
+    is a conservative heuristic with known false positives (`RemainderSolver`):
+    a flagged state is not proven wrong, nor an unflagged one right.
+    'lowdin' or 'linearized' gives the energy-dependent result where the
+    active space fits their memory limit."""
 
 
 class DeltaRootsCrossedWarning(RuntimeWarning):
@@ -843,21 +846,32 @@ class RemainderSolver(EnergyDependentSolver):
     the shift is comparable to that distance (strong coupling), D_SA,
     evaluated at the removal and attachment energies of the states without
     Delta and averaged over the declared states, overshoots: it is large
-    for every state of the set and changes the states of h + D themselves,
-    their character and even their order, so that a static state can be
-    another state than the one exact Loewdin finds. A per-state scalar
-    cannot undo a change of the state, and the energy can then be far from
-    'lowdin'. This is not the case of a root next to a pole
+    for every state of the set and can change the states of h + D
+    themselves, their character and even their order, so that a static
+    state can be another state than the one exact Loewdin finds. A
+    per-state scalar cannot undo a change of the state, and the energy can
+    then be far from 'lowdin'. The states can also stay nearly those of h
+    while the correction is too large for one first-order step; water
+    (docs/methods/downfolding.md, "Choosing the Delta method") fails in
+    both ways. This is not the case of a root next to a pole
     ('delta_near_pole'): no denominator needs to be small. The sign of it
     in the dense methods is a Z well below 1 on the declared states; the
     sign of it here is a large correction, and a state whose |dE_K|
     exceeds numerics.downfolding.delta_remainder_warn is flagged
     'delta_remainder_large' (DeltaRemainderWarning). The threshold is a
-    heuristic, set between the corrections of states that met the bar
-    and those that missed it on three molecules: a flag indicates this
-    regime and does not prove the energy wrong. For a flagged state use
-    'lowdin' or 'linearized' where the active space fits their memory
-    limit.
+    conservative heuristic with known false positives: on five molecules
+    the corrections of the states that met the bar of 0.01 eV against
+    'lowdin' reach 1.40e-2 Ha and those of the states that missed it start
+    at 1.51e-2 Ha, and the default 1e-2 Ha lies inside the passing range,
+    since a false positive costs a check with 'lowdin' and a false negative
+    is a silent error (the flagged states that met the bar, and the
+    sources, are in the docs above). A criterion on the overlap of the
+    states of h + D with those of h separated nothing, since it sees
+    changed states only; an estimate of the second-order relaxation,
+    sum_K' |<K'|Delta - D|K>|^2 / (E_K - E_K'), is future work. A flag
+    does not prove the energy wrong, nor its absence right. For a flagged
+    state use 'lowdin' or 'linearized' where the active space fits their
+    memory limit.
 
     What it reports. Every root is reported with converged True
     (nothing iterates), Z, and the smallest denominator |E - p_m -+ lam|
@@ -974,11 +988,12 @@ class RemainderSolver(EnergyDependentSolver):
                  f'has a correction |dE| = {abs(shift[k]):.2e} Ha, above '
                  f'delta_remainder_warn = {settings.delta_remainder_warn} '
                  f'Ha: a correction this large indicates that the coupling '
-                 f'is strong there and that D_SA may have changed the state '
-                 f'itself, so the first-order correction may be far from '
-                 f'exact Loewdin (the threshold is a heuristic, not a '
-                 f"proof); 'lowdin' or 'linearized' gives the "
-                 f'energy-dependent result where the active space fits '
+                 f'is strong there: D_SA may have changed the state itself, '
+                 f'or the correction may be too large for one first-order '
+                 f'step, so the energy may be far from exact Loewdin (the '
+                 f'threshold is a conservative heuristic with known false '
+                 f"positives, not a proof); 'lowdin' or 'linearized' gives "
+                 f'the energy-dependent result where the active space fits '
                  f'their memory limit' + _STATIC_INDEX,
                  DeltaRemainderWarning)
         return DeltaResult(out_e, static, z, smallest,

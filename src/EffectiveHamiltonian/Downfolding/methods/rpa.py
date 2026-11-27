@@ -231,8 +231,9 @@ class RPALowLevel:
         """The Numerics a build on this result uses: the run's (None: the
         defaults) when `numerics` is None, else `numerics` itself, which may
         differ from the run's in its downfolding section (the settings of
-        Sigma^E and of the cut check, which act after the RPA) and in its
-        layout (memory and tiling, not part of the numerical identity). Any
+        Sigma^E, of the cut check and of Delta, which act after the RPA) and
+        in its layout (memory and tiling, the memory limit of the dense
+        Delta methods among them, not part of the numerical identity). Any
         other difference is refused (NumericsMismatch, a ValueError, naming
         the fields): the run used those."""
         if numerics is None:
@@ -246,13 +247,12 @@ class RPALowLevel:
         if differ:
             raise NumericsMismatch(
                 f"method={METHOD!r}: the numerics of a build can differ from "
-                f"those of the low-level run in numerics.downfolding (srg_s, "
-                f"pole_margin, continuation_margin, the settings of Sigma^E, "
-                f"and no_cut_warn, which act after the RPA) and "
-                f"numerics.layout (memory and tiling) alone; these differ "
-                f"in {', '.join(differ)}, which the run used. Derive the "
-                f"build's numerics from the run's, or call run_low_level with "
-                f"them.")
+                f"those of the low-level run in numerics.downfolding (every "
+                f"field: the settings of Sigma^E, of the cut check and of "
+                f"Delta, which act after the RPA) and numerics.layout "
+                f"(memory and tiling) alone; these differ in "
+                f"{', '.join(differ)}, which the run used. Derive the build's "
+                f"numerics from the run's, or call run_low_level with them.")
         return numerics
 
 
@@ -279,7 +279,11 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False,
         density as well (`_natural_density`), kept as low.natural: the
         unrelaxed density of the same route, on casida from this run's own
         eigenvectors. A restricted reference only (NotImplementedError for
-        UHF/UKS: there is no unrestricted GW density).
+        UHF/UKS: there is no unrestricted GW density), and density fitted
+        only (NotImplementedError for df=False, before the RPA is solved:
+        an active space on natural orbitals needs the three-index factors,
+        which a df=False run does not keep, so every build on them would be
+        refused).
 
     On casida E_RPA,corr comes from the same solve as Omega and X+Y; on
     imagfrequency from `rpa_correlation_energy_imaginary_axis` on the
@@ -303,6 +307,13 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False,
             f"density, so the natural orbitals of a UHF/UKS run do not "
             f"exist.")
     _require_route(mode, df, channels)
+    if natural_orbitals and not df:
+        raise NotImplementedError(
+            f"method={METHOD!r} natural_orbitals=True with df=False: an "
+            f"active space on natural orbitals needs the three-index "
+            f"factors, which a df=False run (the exact four-centre "
+            f"integrals) does not keep, so every build on them would be "
+            f"refused. Use df=True.")
     route = {'casida': _casida_fields,
              'imagfrequency': _imaginary_axis_fields,
              'space-time': _space_time_fields}[mode]
@@ -2874,8 +2885,8 @@ def _require_current_mean_field(low):
 
 def _with_settings(low, numerics):
     """`low` under the settings of `numerics` (`RPALowLevel.settings`: its
-    downfolding section, the Sigma^E settings srg_s, pole_margin and
-    continuation_margin, and its layout) in place of the run's: the same
+    downfolding section, the settings of Sigma^E, of the cut check and of
+    Delta, and its layout) in place of the run's: the same
     result, sharing its cache; `low` itself for None. The settings act after
     the RPA, so they can change from one Hamiltonian to the next without a
     new run. Every other section was used by the run and has to be the

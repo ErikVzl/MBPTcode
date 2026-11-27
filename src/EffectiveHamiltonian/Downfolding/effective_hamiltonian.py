@@ -48,8 +48,10 @@ from src.EffectiveHamiltonian.orbital_basis import (orbitals_source,
                                                     semicanonical_rotation)
 from src.EffectiveHamiltonian.solvers.determinants import (
     spatial_to_spin_orbitals)
-from src.EffectiveHamiltonian.solvers.solve import (ENGINES, SolveRequest,
-                                                    solve, static_states)
+from src.EffectiveHamiltonian.solvers.solve import (ENGINES,
+                                                    OPTIONAL_OUT_KEYS,
+                                                    SolveRequest, solve,
+                                                    static_states)
 
 from .core import core_terms
 from .double_counting import double_counting
@@ -189,19 +191,30 @@ def _rotated_orbitals(mo, eps, spaces):
             rotations)
 
 
-def _require_delta_route(spaces, delta):
-    """Refuse, with Delta on, an unrestricted reference with an orbital
-    basis: Delta for two spin channels is not built, and a rotated basis
-    without it is the static Hamiltonian only, which delta=False asks for
-    by name (NotImplementedError)."""
-    if delta and len(spaces) == 2 and any(s.basis is not None
-                                          for s in spaces):
+def _require_delta_route(spaces, delta, spin_free):
+    """Refuse, with Delta on and an orbital basis, what has no Delta: an
+    unrestricted reference (Delta for two spin channels is not built) and
+    spin_free=False (the coupling and the Delta solvers are written on the
+    spatial active orbitals). A rotated basis without Delta is the static
+    Hamiltonian only, which delta=False asks for by name
+    (NotImplementedError)."""
+    if not delta or not any(s.basis is not None for s in spaces):
+        return
+    if len(spaces) == 2:
         raise NotImplementedError(
             'an unrestricted (UHF/UKS) reference on a rotated orbital basis '
             'with Delta on: the unrestricted Delta, the folding of the Fock '
             'coupling of two spin channels, is not built. delta=False gives '
             'the static Hamiltonian only (E_0, the one-body and the '
             'two-body part), without the coupling the rotation creates.')
+    if not spin_free:
+        raise NotImplementedError(
+            'an active space on a rotated orbital basis with spin_free=False '
+            'and Delta on: the coupling the rotation creates, and the Delta '
+            'solvers that fold it, are written on the spatial active '
+            'orbitals. Build with spin_free=True for Delta; delta=False '
+            'gives the static Hamiltonian only (E_0, the one-body and the '
+            'two-body part) over the spin orbitals, without the coupling.')
 
 
 #: the options of the DMRG static solve that `prepare_delta` passes on
@@ -327,12 +340,14 @@ class DownfoldedHamiltonian:
           shifts a state by an amount comparable to the distance between
           the states' removal and attachment energies and the environment
           levels, D_SA, evaluated at the energies without Delta and
-          averaged over the declared states, overshoots and changes the
+          averaged over the declared states, overshoots and can change the
           states of h + D themselves (even their order), which a per-state
-          scalar cannot undo, and the energy can be far from 'lowdin'. The
+          scalar cannot undo, or the correction is too large for one
+          first-order step, and the energy can be far from 'lowdin'. The
           dense methods show it as a Z well below 1; here a correction
           |dE_K| above numerics.downfolding.delta_remainder_warn, a
-          heuristic sign of it, is flagged 'delta_remainder_large'
+          conservative heuristic sign of it with known false positives
+          (`RemainderSolver`), is flagged 'delta_remainder_large'
           (DeltaRemainderWarning): use 'lowdin' or 'linearized' for such
           states where the active space fits.
         - False: no Delta, with DeltaOffWarning and the flag 'delta_off'
@@ -344,9 +359,9 @@ class DownfoldedHamiltonian:
         refused before anything is solved, naming the static forms. A
         record without a coupling takes None or False and refuses a named
         method
-        (ValueError: there is nothing to fold). A record with a coupling
-        built with spin_free=False refuses every method but False
-        (NotImplementedError: the coupling is spatial).
+        (ValueError: there is nothing to fold). A record with a coupling is
+        spin-free: the build refuses a rotated basis with spin_free=False
+        and Delta on (NotImplementedError).
 
         With Delta the energies are returned in ascending order: Delta can
         move two states past each other. out['static_index'] gives for each
@@ -389,13 +404,18 @@ class DownfoldedHamiltonian:
         'near_pole' and 'lanczos_change'; no 'solutions_below'). For a
         record with a coupling, False and the
         static forms also give 'static' = out['e_active'], 'correction'
-        zero and 'z' one. E_0 for reporting is energies.e0, or out['e0']
-        for the constant of one solve; E^A is out['e_active'], never a
-        total minus a constant chosen by hand."""
+        zero and 'z' one. A dict used for an earlier solve first loses
+        'spin_square' and every Delta entry (OPTIONAL_OUT_KEYS of
+        solvers/solve.py), so it holds the last solve alone. E_0 for
+        reporting is energies.e0, or out['e0'] for the constant of one
+        solve; E^A is out['e_active'], never a total minus a constant
+        chosen by hand."""
         if out is not None:
-            # a dict used for an earlier solve keeps none of its Delta
-            # entries: the solve below writes the ones it has
-            for key in DELTA_OUT_KEYS:
+            # a dict used for an earlier solve keeps none of the entries
+            # a solve writes only sometimes (also when this one is refused
+            # before `solvers.solve.solve` runs): the solve below writes the
+            # ones it has
+            for key in OPTIONAL_OUT_KEYS:
                 out.pop(key, None)
         supplied = sorted(k for k in ('sides', 'd_sa', 'numerics')
                           if k in kwargs)
@@ -444,7 +464,7 @@ class DownfoldedHamiltonian:
         refusals and warning as there ('static_sa' needs `prepare_delta`;
         'static_mf' warns StaticDeltaWarning with the flag
         'delta_static_mf'; a record without a coupling has nothing to fold,
-        ValueError; one built with spin_free=False, NotImplementedError).
+        ValueError).
         False: g_eff itself, {0: e0_without_delta, 1: h, 2: v}, the
         decoupled model, with DeltaOffWarning (flag 'delta_off') when the
         record has a coupling; this function has no `out`, so the warning
@@ -463,7 +483,6 @@ class DownfoldedHamiltonian:
                 f'solve.')
         if self.hybridization is None:
             raise ValueError(_nothing_to_fold(delta_method))
-        self._require_spin_free()
         return self._static_form(delta_method, 3)
 
     def prepare_delta(self, states, solver='pyscf_fci', **solver_opts):
@@ -493,8 +512,7 @@ class DownfoldedHamiltonian:
         request with spin=None (an SU2 solve is one total spin).
         solver_opts: the DMRG settings dmrg_bond_dim and dmrg_n_sweeps, as
         `solve` takes them. Refused: a record without a coupling
-        (ValueError: there is nothing to fold) and one built with
-        spin_free=False (NotImplementedError). D_SA depends on the set of
+        (ValueError: there is nothing to fold). D_SA depends on the set of
         states, so two solves that are compared (another nroots, another
         spin) share one prepared record."""
         unknown = sorted(set(solver_opts) - set(DMRG_OPTIONS))
@@ -503,7 +521,6 @@ class DownfoldedHamiltonian:
                             f'{DMRG_OPTIONS}; got {unknown}.')
         if self.hybridization is None:
             raise ValueError(_nothing_to_fold('static_sa'))
-        self._require_spin_free()
         if solver not in ENGINES:
             raise ValueError(f'solver={solver!r} is not a backend of the '
                              f'solvers; choose one of {tuple(ENGINES)}.')
@@ -535,23 +552,13 @@ class DownfoldedHamiltonian:
 
     def _method(self, delta_method):
         """The Delta method of a record with a coupling: None is
-        'linearized'; an unknown name is refused (ValueError), every method
-        on a spin_free=False record (NotImplementedError)."""
+        'linearized'; an unknown name is refused (ValueError)."""
         method = 'linearized' if delta_method is None else delta_method
         if isinstance(method, bool) or method not in DELTA_METHODS:
             raise ValueError(
                 f'delta_method={delta_method!r}: one of {DELTA_METHODS}, '
                 f"None (= 'linearized') or False (no Delta).")
-        self._require_spin_free()
         return method
-
-    def _require_spin_free(self):
-        if not self.space['spin_free']:
-            raise NotImplementedError(
-                'Delta on a record built with spin_free=False: the coupling '
-                'is written on the spatial active orbitals; build with '
-                'spin_free=True, or solve with delta_method=False for the '
-                'static Hamiltonian only.')
 
     def _static_form(self, method, stacklevel):
         """{0: e0 + c, 1: h + D, 2: v} of the static form `method`; the
@@ -625,16 +632,6 @@ def _nothing_to_fold(delta_method):
             f'fold; solve it with delta_method=None or False.')
 
 
-#: the entries of `out` that only a Delta solve writes (`solve`), and the
-#: ones `_static_parts` writes without one: removed at the start of each
-#: record solve, so that a reused `out` holds the last solve alone
-DELTA_OUT_KEYS = (
-    'static', 'correction', 'z', 'min_denominator', 'converged',
-    'static_index', 'crossing_unchecked', 'solutions_below', 'near_pole',
-    'above_pole', 'linearization_error', 'linearization_point',
-    'lanczos_change')
-
-
 def _static_parts(out):
     """The Delta entries of `out` for a solve without a dynamic method
     (False, the static forms): static = e_active, correction 0, z 1."""
@@ -706,9 +703,11 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     straight to src.EffectiveHamiltonian.solvers.solve.solve:
     g_eff = {0: e0_without_delta, 1: h_eff, 2: physicist v_eff}, spatial when
     spin_free, else over the 2 n_act interleaved spin orbitals; space holds
-    n_orbs, n_elec_active, act_idx, act_occ_idx, act_vir_idx (canonical
-    spatial indices), spin_free and active_space. energies is the `Energies`
-    record of every E_0 term; diagnostics are the method's, keyed by name.
+    n_orbs, n_elec_active, act_idx, act_occ_idx, act_vir_idx (spatial
+    indices: of the canonical orbitals, or on a space with an orbital basis
+    of the orbitals of that basis, the columns of space['mo']), spin_free
+    and active_space. energies is the `Energies` record of every E_0 term;
+    diagnostics are the method's, keyed by name.
 
     For an unrestricted reference (UHF/UKS) `active_space` is a pair
     (space_alpha, space_beta), one ActiveSpace per spin with independent
@@ -748,11 +747,12 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     (ValueError), a basis on one spin of an unrestricted pair only
     (ValueError), and the exact integrals of an RPA run (df=False,
     NotImplementedError). An unrestricted reference takes a basis on both
-    spins, each built on that spin's orbitals, with delta=False only (see
-    `delta`).
+    spins, each built on that spin's orbitals, with delta=False only, and so
+    does spin_free=False (see `delta`).
 
-    delta: True | False. On a rotated orbital basis the rotation couples
-    active and environment orbitals; with delta=True, the default, that
+    delta: True | False (anything else, TypeError). On a rotated orbital
+    basis the rotation couples active and environment orbitals; with
+    delta=True, the default, that
     Fock coupling is built (`fock_coupling`, hybridization.py) as
     h.hybridization, the term Delta folds, with its norms in
     diagnostics['fock_coupling'] = {'folded': the norm of each coupling
@@ -767,9 +767,13 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     (`Coupling.sides`). An unrestricted reference with a basis is refused
     with Delta on, the default (NotImplementedError): Delta for two spin
     channels is not built, so the static Hamiltonian it gives with
-    delta=False has to be asked for by name. For canonical orbitals the
-    coupling is identically zero: nothing is built, hybridization is None
-    and there is no 'fock_coupling' entry, whatever `delta` is. _blocks
+    delta=False has to be asked for by name. So is spin_free=False with a
+    basis (NotImplementedError, before the method's downfold runs): the
+    coupling and the Delta solvers are written on the spatial active
+    orbitals, and delta=False gives the static Hamiltonian over the spin
+    orbitals. For canonical orbitals the coupling is identically zero:
+    nothing is built, hybridization is None
+    and there is no 'fock_coupling' entry, with delta True or False. _blocks
     (tests only) replaces DEFAULT_BLOCKS, the blocks the coupling folds.
     Exactly when the coupling is built the method's `downfold` gets
     hybridization=True and E_0 gains its one Delta term,
@@ -787,6 +791,10 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     (`low.numerical_flags`) and those raised while building it, each
     distinct {'flag': name, 'message': text} once; empty for a clean result.
     """
+    if not isinstance(delta, (bool, np.bool_)):
+        raise TypeError(
+            f'delta={delta!r}: True (on a rotated orbital basis, build the '
+            f'coupling that Delta folds) or False (leave it out).')
     mf = low.mf
     mol = mf.mol
     mo, eps, nocc = _spin_channels(mf)
@@ -801,7 +809,7 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     with collecting(flags):
         spaces = _active_spaces(active_space, mo, eps, nocc, settings)
         _require_basis_route(low, spaces)
-        _require_delta_route(spaces, delta)
+        _require_delta_route(spaces, delta, spin_free)
         rotated = any(s.basis is not None for s in spaces)
         unrestricted = len(spaces) == 2
         method = require_choice(low.method, tuple(LOW_LEVEL), 'method')
@@ -829,8 +837,9 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         diagnostics = dict(terms.diagnostics)
         coupling = None
         if rotated and delta:
-            # one channel: an unrestricted reference with a basis and Delta
-            # on is refused above (_require_delta_route)
+            # one channel and spin_free: an unrestricted reference with a
+            # basis and Delta on, and spin_free=False with a basis and Delta
+            # on, are refused above (_require_delta_route)
             coupling = fock_coupling(
                 mf, mo[0], rotations[0], eps[0], spaces[0],
                 blocks=DEFAULT_BLOCKS if _blocks is None else _blocks)

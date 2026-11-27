@@ -22,6 +22,11 @@ run_low_level(mf, method, **method_opts)
     numerics    None (the defaults) | a Numerics (space-time needs one)
     qp          False | True: also the one-shot G0W0 QP spectrum of every
                 orbital on the run's W, kept as low.qp
+    natural_orbitals  False | True: also the oo and vv blocks of the GW
+                density, kept as low.natural, from which
+                `natural_orbital_basis` (orbital_basis.py) makes natural
+                orbitals; restricted references and df=True only
+                (NotImplementedError otherwise)
 
 build_effective_hamiltonian(low, active_space, spin_free, delta,
                             **method_opts)
@@ -29,7 +34,9 @@ build_effective_hamiltonian(low, active_space, spin_free, delta,
     delta       True | False: on a rotated orbital basis, build the Fock
                 coupling between active and environment orbitals that Delta
                 folds (h.hybridization) | leave it out (DeltaOffWarning);
-                nothing to build for canonical orbitals
+                nothing to build for canonical orbitals. With a basis,
+                delta=True is refused for an unrestricted reference and
+                with spin_free=False (NotImplementedError)
     screening   'crpa' | 'bare' | 'crpa_ph' | 'mrpa': cRPA W^r | the bare v
                 | W^r on the particle-hole elements only | Scott and Booth's
                 moment-conserving interaction (casida only)
@@ -41,7 +48,9 @@ build_effective_hamiltonian(low, active_space, spin_free, delta,
                 energies of the active orbitals ('qp' needs qp=True)
     diagnostics all of rpa.DIAGNOSTICS | a subset | None
     numerics    None (the run's) | a Numerics whose downfolding section
-                (srg_s, pole_margin, continuation_margin) replaces the run's
+                (the settings of Sigma^E, of the cut check of a rotated
+                basis and of Delta) and layout section (the memory limit
+                of the dense Delta methods among them) replace the run's
 
 h.solve(solver, delta_method, out, **solve options)
     delta_method None (= 'linearized') | 'lowdin' | 'sa_remainder' |

@@ -458,12 +458,24 @@ DOWNFOLDING_DELTA_RANK_TOL = 1e-8
 # |dE_K| = |r_K / (1 - r'_K)| exceeds this, Hartree ('delta_remainder_large').
 # The correction is first order in Delta - D_SA; a large one indicates that
 # D_SA was far from Delta at that state's energy and may also have changed
-# the state itself, which a scalar cannot undo. A heuristic threshold, not
-# a proof that a flagged energy is wrong. 1e-2 Ha lies between the largest
-# correction of the states that meet the bar of 0.01 eV against exact
-# Loewdin (N2/6-31G and benzene/cc-pVDZ NO CAS(6,6): up to 7.0e-3 Ha) and
-# the smallest of those that miss it (water/6-31G NO CAS(4,4): from
-# 1.5e-2 Ha).
+# the state itself, which a scalar cannot undo, or that the correction is
+# too large for one first-order step. A conservative heuristic threshold,
+# not a proof that a flagged energy is wrong. Measured on 2026-11-27 after
+# commit 29eebc6 (outside the tests) on five molecules, water/6-31G NO
+# CAS(4,4), N2/6-31G and benzene/cc-pVDZ NO CAS(6,6), butadiene/cc-pVDZ NO
+# CAS(4,4) and ethylene/cc-pVDZ NO CAS(2,2) (example 24): the states that
+# meet the bar of 0.01 eV against exact Loewdin (butadiene by its
+# excitation energies) have corrections up to 1.40e-2 Ha, those that miss
+# it (every water state) from 1.51e-2 Ha, a factor 1.08 apart. 1e-2 Ha lies
+# inside the passing range by design: a false positive costs a check with
+# 'lowdin', a false negative is a silent error. Its known false positives:
+# ethylene's lowest triplet (1.30e-2 Ha, 1.3e-5 Ha from Loewdin) and
+# butadiene's third triplet and first excited singlet (1.40e-2 and
+# 1.10e-2 Ha, excitation energies within the bar). A criterion on the
+# overlap of the states of h + D_SA with those of h separated nothing (water
+# fails both by changed states and by a too-large first-order correction,
+# and the overlap sees only the first); an estimate of the second-order
+# relaxation, sum_K' |<K'|Delta - D|K>|^2 / (E_K - E_K'), is future work.
 DOWNFOLDING_DELTA_REMAINDER_WARN = 1e-2
 # The memory, in GB, the dense Delta methods ('lowdin', 'linearized') may take
 # outside a Slurm job when numerics.layout.delta_dense_gb is None; inside one

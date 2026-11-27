@@ -276,3 +276,21 @@ def test_downfolded_hamiltonian_solve_takes_spin():
             h1, eri, n, nelec, nroots=nroots, spin=spin)[0]
         got = h.solve('pyscf_fci', nroots=nroots, spin=spin)
         assert np.abs(got - want).max() < 1e-9
+
+
+def test_a_reused_out_holds_the_last_solve_alone():
+    """solve writes 'e0', 'e_active' and 'numerical_flags' on every call,
+    and 'spin_square' and the Delta entries only where its solver and
+    options give them; a dict reused for a second solve keeps none of the
+    first's: 'pyscf_fci' writes 'spin_square', 'openfermion' does not, and
+    after both the dict holds the second solve alone."""
+    g_eff, norb, nelec = _h4_g_eff()
+    out = {}
+    solve('pyscf_fci', g_eff, norb, nelec, spin_free=True, nroots=2, out=out)
+    assert len(out['spin_square']) == 2
+    out['z'] = 'from an earlier Delta solve'
+    e = solve('openfermion', g_eff, norb, nelec, spin_free=True, nroots=2,
+              out=out)
+    assert sorted(out) == ['e0', 'e_active', 'numerical_flags']
+    assert out['e0'] == 0.0 and out['numerical_flags'] == []
+    assert np.allclose(out['e0'] + out['e_active'], e, atol=1e-12)

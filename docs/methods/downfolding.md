@@ -129,9 +129,9 @@ Options of the RPA:
 | | `df` | `True`: the screening from the mean field's density fit (an exact eigendecomposition of the MO integrals if it has none; ISDF factors on `'space-time'`); `False`: exact 4-centre integrals, `'casida'` only |
 | | `numerics` | a `Numerics`, or `None` for the defaults (`'space-time'` needs one naming the ISDF grid) |
 | | `qp` | `False` (default); `True`: also the G0W0 QP spectrum of every orbital, `low.qp` (below) |
-| | `natural_orbitals` | `False` (default); `True`: also the occupied-occupied and virtual-virtual blocks of the RPA (GW) density, `low.natural`, from which `natural_orbital_basis` makes natural orbitals ([Natural-orbital active spaces](#natural-orbital-active-spaces)); restricted references only |
+| | `natural_orbitals` | `False` (default); `True`: also the occupied-occupied and virtual-virtual blocks of the RPA (GW) density, `low.natural`, from which `natural_orbital_basis` makes natural orbitals ([Natural-orbital active spaces](#natural-orbital-active-spaces)); restricted references and `df=True` only (`NotImplementedError` otherwise, before the RPA is solved: a build on natural orbitals needs three-index factors) |
 | `build_effective_hamiltonian` | `active_space` | one `ActiveSpace` for a restricted reference; the pair `(space_alpha, space_beta)` for UHF/UKS. An `ActiveSpace` with a `basis` (natural orbitals) indexes the orbitals of that basis |
-| | `delta` | `True` (default): on a rotated basis, build the coupling between active and environment orbitals that Delta folds (`h.hybridization`) and the E_0 term that goes with it; `False`: leave it out, flagged `'delta_off'`. Nothing to build for canonical orbitals, whatever it is |
+| | `delta` | `True` (default): on a rotated basis, build the coupling between active and environment orbitals that Delta folds (`h.hybridization`) and the E_0 term that goes with it; `False`: leave it out, flagged `'delta_off'`. Nothing to build for canonical orbitals, with either. Any other value is refused (`TypeError`); with a basis, `True` is refused for an unrestricted reference and with `spin_free=False` (`NotImplementedError`) |
 | | `spin_free` | `True` (default): spatial-orbital `g_eff`, for UHF/UKS the per-spin blocks `(h_alpha, h_beta)` and `(aa, ab, bb)`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'`; `'mrpa'` on `'casida'` only |
 | | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'averaged'` (Sigma^E, below). On `'casida'` 'srg' is damped at `srg_s`, on `'imagfrequency'` and `'space-time'` it is s = inf, continued from the imaginary axis. Not the default: with `crpa` it can be unreliable, see [Known difficulties](#known-difficulties) |
@@ -361,10 +361,10 @@ Delta is that term; the orbital-energy differences of the formulas above are
 written d_ia here.)
 
 Without Delta a rotated basis is not a usable method: on benzene/cc-pVDZ
-(HF, the pi CAS(6,6) with virtual NOs) the excitation energies without
-Delta lie 1.24 to 1.37 eV above those of exact Loewdin (measured on
-2026-11-27 at commit 7c4bf1b), as the prototype of this method found (1.3 to
-1.45 eV). Delta is therefore on by default, and leaving it out is flagged.
+(HF, the pi CAS(6,6) with virtual NOs, `sigma=None`) the excitation
+energies without Delta lie 1.24 to 1.37 eV above those of exact Loewdin
+(measured on 2026-11-27 at commit 7c4bf1b), as the prototype of this
+method found (1.3 to 1.45 eV). Delta is therefore on by default, and leaving it out is flagged.
 
 ### Getting the natural orbitals
 
@@ -422,16 +422,17 @@ the pi orbitals of ethylene by their p_z weight.
 populations on the atoms and its symmetry, is read from the orbitals
 themselves, the columns of `mf.mo_coeff @ basis.rotation`. Where two occupied NOs have nearly equal holes, the one with the
 larger hole need not be the orbital the active space needs. N2 at 1.1 A,
-cc-pVDZ, RHF: the three occupied NOs with the largest holes are the two
-pi_u NOs and 2sigma_u (occupations 1.95948, 1.95948 and 1.97343), not the
+cc-pVDZ, RHF with exact integrals: the three occupied NOs with the
+largest holes are the two pi_u NOs and 2sigma_u (occupations 1.95948, 1.95948 and 1.97343), not the
 3sigma_g of a CASSCF(6,6) valence space, whose occupation, 1.97424,
 differs from that of 2sigma_u by 8e-4. With them in an NO CAS(6,6) (and
 the three virtual NOs of largest occupation; Delta, `'linearized'`;
 `sigma='srg'`) the total lies +5.98 mEh from the same downfolding with the
 canonical CAS(10,16) (every valence orbital and the 11 lowest canonical
 virtual orbitals active), against -1.10 mEh with 3sigma_g in place of
-2sigma_u. At 1.6 A the three largest holes are the CASSCF orbitals (a run
-of 2026-11-27 at commit 0d914e0, outside the tests).
+2sigma_u. At 1.6 A the three largest holes are the CASSCF orbitals. (Every
+number of this paragraph is from one run of 2026-11-27 at commit 0d914e0,
+outside the tests.)
 
 **The cut.** Two NOs whose occupations are equal (symmetry partners, such
 as a degenerate pi pair) are an arbitrary pair of vectors of one
@@ -495,7 +496,7 @@ the basis leaves as the identity (the occupied one with
   `'left_out'`, the norms of what Delta does not fold. For canonical
   orbitals the coupling is identically zero on any reference: nothing is
   built, `h.hybridization` is None, and the route is bit for bit the one
-  before natural orbitals, whatever `delta` is.
+  before natural orbitals, with `delta=True` or `False`.
 
 With M the eigenstates of the static active Hamiltonian with one electron
 less (particle side) or more (hole side), Delta and the Hamiltonian it
@@ -603,16 +604,23 @@ through the same option:
 | `'static_mf'` | D at the mean-field energies of the active orbitals (the diagonal of the bare Fock operator on the active block) | nothing solved first; any solver; warns on every use | 0.82 eV on benzene (the prototype: 0.8 eV, 1.1 eV at QZ) |
 | `False` | no Delta | flagged `'delta_off'` | 1.24 to 1.37 eV too high on benzene (the prototype: 1.3 to 1.45 eV) |
 
-Where each number was measured: benzene/cc-pVDZ HF, the pi CAS(6,6) with
-virtual NOs, the largest deviation from `'lowdin'` over six excitation
-energies (a run on 2026-11-27 at commit 7c4bf1b; the remainder's
-1.1e-4 Ha is on the totals, 8.5e-5 Ha on the excitation energies,
-`tests/test_downfolding_no_remainder.py`); N2/6-31G NO CAS(6,6), the eight
+Where each number was measured: benzene/cc-pVDZ HF (density fitted, D6h,
+the geometry of `tests/no_downfolding.benzene`), the pi CAS(6,6) with
+virtual NOs, `sigma=None`, the largest deviation from `'lowdin'` over six
+excitation energies of seven states of any spin (a run on 2026-11-27 at
+commit 7c4bf1b; the remainder's 1.1e-4 Ha is on the totals, 8.5e-5 Ha on
+the excitation energies, `tests/test_downfolding_no_remainder.py`, the same
+model); N2/6-31G NO CAS(6,6), the eight
 lowest states (`tests/test_downfolding_no_delta_dense.py`, commit b54a8ca)
 and for `'sa_remainder'` both sides (`tests/test_downfolding_no_remainder.py`,
 2026-11-27); water/6-31G NO CAS(4,4) (`tests/test_downfolding_no_delta_dense.py`).
 The prototype's numbers were for benzene CAS(6,6) with its own residual
-polarizability, which is not the exact one built here.
+polarizability, which is not the exact one built here. The benzene numbers
+under [References that are not HF](#references-that-are-not-hf) are of
+another model (`sigma='srg'`, another geometry, the states declared to
+`prepare_delta` by spin, commit 0d914e0) and differ from these: on HF
+3.1e-7 eV for `'linearized'`, 0.12 eV for `'static_sa'` and 0.84 eV for
+`'static_mf'`.
 
 The static forms change h and run with every solver; their hole part (with
 `rotate_occupied=True`) is a one-body matrix with the sign of the particle
@@ -663,9 +671,9 @@ per-root entry of `out` is permuted with them. Two flags of
   returned root than returned roots do, so a state the static solve did
   not compute went below it, and more roots are needed (how many is not
   known in advance; the message gives the least `nroots` that can reach
-  it). On water/6-31G NO CAS(4,4), `h.solve('pyscf_fci', nroots=2)` raises
-  it, correctly: in the explicit P + Q matrix the refinements of static
-  states 2 and 5 lie below a returned root, so `nroots=6` is needed to
+  it). On water/6-31G NO CAS(4,4) (virtual NOs, `rotate_occupied=False`),
+  `h.solve('pyscf_fci', nroots=2)` raises it, correctly: in the explicit
+  P + Q matrix the refinements of static states 2 and 5 lie below a returned root, so `nroots=6` is needed to
   compute them (checked against that matrix on 2026-11-27, commit
   68aed94).
 
@@ -695,8 +703,10 @@ sees), `'converged'`, `'static_index'`, `'crossing_unchecked'`,
 `'linearization_error'` and `'linearization_point'` for `'linearized'`,
 `'near_pole'` and `'lanczos_change'` for `'sa_remainder'`. With `False` or a
 static form, on a record with a coupling, `'static'` is `out['e_active']`,
-`'correction'` zero and `'z'` one. A reused `out` loses the Delta entries
-of its earlier solve.
+`'correction'` zero and `'z'` one. A reused `out` first loses
+`'spin_square'` and the Delta entries of its earlier solve (also when the
+earlier solve was made with another solver), so it holds the last solve
+alone.
 
 **The flags of a Delta solve**, each a named flag with its row in
 `docs/warnings.md`: `'delta_near_pole'` (a root, or the linearization point
@@ -858,7 +868,8 @@ miss `'lowdin'` by 6.3e-4 and 1.4e-4 Ha, Z 0.75 and 0.79, without a flag
 (`'delta_satellite'`) and a linearization point next to a pole
 (`'delta_near_pole'`). On the weakly coupled cases it agrees with `'lowdin'`:
 benzene/cc-pVDZ pi CAS(6,6), six excitation energies, within 1.8e-7 eV (a
-run at commit 7c4bf1b); N2/6-31G NO CAS(6,6), eight states, within 7.1e-9 Ha
+run at commit 7c4bf1b, `sigma=None`); N2/6-31G NO CAS(6,6), eight states,
+within 7.1e-9 Ha
 (commit b54a8ca); the N2/6-31G ground state at 1.1 and 1.6 A in NO
 CAS(6,5) to CAS(6,8), Z 0.992 to 0.998, estimate equal to the true error,
 both at most 1e-8 Ha (a run at commit 7c4bf1b); the PBE0 water ground state
@@ -875,24 +886,82 @@ methods. On weakly coupled states it meets the bar of 0.01 eV
 1.1e-4 Ha and excitation energies within 8.5e-5 Ha; N2/6-31G NO CAS(6,6),
 totals within 1.7e-4 Ha (particle side) and 1.9e-4 Ha (both sides)
 (`tests/test_downfolding_no_remainder.py`, measured 2026-11-27). On the strongly
-coupled water states it does not: D_SA, evaluated at the energies without
-Delta and averaged over the states, overshoots and changes the states of
-h + D_SA themselves (on the HF particle side the third singlet of h + D_SA
-is another state than Loewdin's, 0.86 Ha off), which a per-state scalar
-cannot undo. A correction |dE_K| above `delta_remainder_warn` (1e-2 Ha)
-raises `'delta_remainder_large'` as a sign of this regime; every water state
-that missed the bar was flagged. The threshold is a heuristic, set between
-the largest correction of the states that met the bar (7.0e-3 Ha, N2) and
-the smallest of those that missed it (1.5e-2 Ha, water), a margin of 1.4 to
-1.5: a flag does not prove an energy wrong, and its absence does not prove
-it right. In example 24 (ethylene/cc-pVDZ, NO CAS(2,2)) the triplet is
-flagged with |dE| = 1.3e-2 Ha and lies 1.3e-5 Ha from `'lowdin'`, while the
-unflagged ground state lies 2.0e-4 Ha from it. Its Lanczos depth,
+coupled water states (water/6-31G NO CAS(4,4)) it does not, in two ways.
+D_SA, evaluated at the energies without Delta and averaged over the
+states, overshoots and can change the states of h + D_SA themselves (on
+HF with virtual NOs the third singlet of h + D_SA is another state than
+Loewdin's, 0.86 Ha off), which a per-state scalar cannot undo. Or the
+states stay nearly those of h, but the correction is too large for one
+first-order step: the other excited states of HF water with virtual NOs
+have corrections of 0.53 to 0.55 Ha and miss `'lowdin'` by 5.8e-2 to
+6.8e-2 Ha.
+
+A correction |dE_K| above `delta_remainder_warn` (1e-2 Ha) raises
+`'delta_remainder_large'`. The threshold is a conservative heuristic, with
+known false positives. On five molecules (a measurement of 2026-11-27 after
+commit 29eebc6, outside the tests: the states of
+`tests/test_downfolding_no_remainder.py` on water, N2 and benzene;
+benzene/cc-pVDZ on HF and PBE as in [References that are not
+HF](#references-that-are-not-hf); butadiene/cc-pVDZ, density-fitted HF, NO
+CAS(4,4), `sigma='srg'`, four singlets and three triplets; example 24,
+ethylene/cc-pVDZ NO CAS(2,2)), the states that met the bar of 0.01 eV
+against `'lowdin'` (on butadiene judged by the excitation energies) have
+corrections up to 1.40e-2 Ha, and those that missed it start at
+1.51e-2 Ha (the ground state of PBE0 water with both sides folded). Every
+water state missed the bar, and every one is flagged. The two ranges are a
+factor 1.08 apart: a threshold between them, about 1.45e-2 Ha, would leave
+a margin of 1.04 on each side. 1e-2 Ha lies inside the range of the
+passing states by design, because a false positive costs a check with
+`'lowdin'` and a false negative is a silent error. The known false
+positives: in example 24 the lowest triplet is flagged with
+|dE| = 1.30e-2 Ha and lies 1.3e-5 Ha from `'lowdin'` (the unflagged ground
+state lies 2.0e-4 Ha from it); on butadiene the third triplet
+(|dE| = 1.40e-2 Ha) and the first excited singlet (|dE| = 1.10e-2 Ha) are
+flagged, and their excitation energies are within the bar (1.7e-4 and
+2.9e-4 Ha off), while their totals miss it (4.7e-4 and 5.9e-4 Ha off). A
+flag does not prove an energy wrong, and its absence does not prove it
+right.
+
+A criterion on the overlap of each state of h + D_SA with its counterpart
+among the states of h (one more static solve) was tried on the same states
+and separates nothing: states that met the bar have overlaps down to 0.988
+(butadiene's first excited singlet), and the three water states of the
+second way above, which missed it by 5.8e-2 to 6.8e-2 Ha, have 0.9995 to
+0.9999. The overlap sees the first way water fails, changed states, and
+not the second, a first-order correction that is too large.
+Future work: an estimate of the second-order relaxation,
+sum_K' |<K'|Delta - D|K>|^2 / (E_K - E_K'), not measured.
+
+Its Lanczos depth,
 `delta_lanczos_depth`, is 5 blocks: on the strongly coupled water state the
 correction was 7.2e-5 Ha from its full-depth value at depth 3 and 1.2e-7 Ha
 at depth 5, for about 20% more time per solve (N2/6-31G and benzene/cc-pVDZ
 NO CAS(6,6): 0.051 to 0.060 s and 0.044 to 0.053 s; 2026-11-27, commit
 0d914e0).
+
+**What the natural-orbital route costs beyond a canonical one** (how it
+scales; not measured here). On casida, every build with Delta on computes
+`e_c_hybridization` by the plasmon formula over all canonical
+occupied-virtual pairs (`hybridized_ec_plasmon`): one dense
+diagonalization of a matrix the size of the full Casida problem,
+(n_occ n_virt)^2 elements and (n_occ n_virt)^3 operations, as large as the
+run's own eigenproblem; imagfrequency and space-time take a sum over their
+frequency grid instead. Every build with a coupling builds the bare Fock
+operator from the exact four-centre J and K of the molecule (`fock_coupling`,
+pyscf's `get_jk`), N_AO^4 integrals, also for a density-fitted mean field.
+`natural_orbitals=True` on casida takes the density from the run's own
+eigenvectors; on imagfrequency and space-time it computes the full GW
+self-energy matrix again on its own frequency grid, which builds the
+route's W again. The dense Delta methods build every sector matrix column
+by column, one product H v per determinant (dim(K) products for the sector
+of the states, dim(M) for each sector with one electron less or more), and
+diagonalize it densely, dim^3 operations. Each evaluation of H_eff(E), or
+of its derivative, as a matrix (one per `'lowdin'` step of each state or
+degenerate set; three per state or set of `'linearized'`: H_eff and its
+derivative at the starting point, and H_eff at the result for the count of
+solutions below it) regenerates the amplitude slices <M|a_u|K> of every
+coupled sector, r (r + 1) slices of dim(M) x dim(K) for r coupled active
+orbitals, so that at most two are held at a time.
 
 The rule:
 
@@ -972,7 +1041,7 @@ All are fields of `numerics.downfolding` (default constants in
 | `delta_occupation_floor` | 1e-6 | D_SA drops a direction of the state-averaged occupation (of the active virtual orbitals, or of the holes of the active occupied ones) at or below this, which no state of the average empties or fills |
 | `delta_lanczos_depth` | 5 | the blocks of the block Lanczos of `'sa_remainder'`; `out['lanczos_change']` is the change of each correction from one block less |
 | `delta_rank_tol` | 1e-8 | block Lanczos takes a start vector of smaller norm as zero and drops a direction of smaller norm |
-| `delta_remainder_warn` | 1e-2 Ha | `'sa_remainder'` flags a correction above this (`'delta_remainder_large'`), a heuristic threshold |
+| `delta_remainder_warn` | 1e-2 Ha | `'sa_remainder'` flags a correction above this (`'delta_remainder_large'`), a conservative heuristic threshold with known false positives ([above](#choosing-the-delta-method)) |
 | `layout.delta_dense_gb` | None | the memory limit of the dense methods ([above](#memory-of-the-dense-delta-methods)) |
 
 The Sigma^E settings of the same section (`srg_s`, `pole_margin`,
@@ -1019,13 +1088,16 @@ HF; butadiene 0.15 against 0.22).
 What the rotation-only form gives on such a reference, measured on two
 molecules with `sigma='srg'` (runs of 2026-11-27, outside the tests):
 
-- Benzene/cc-pVDZ, the pi NO CAS(6,6) (canonical occupied pi orbitals, the
-  three virtual NOs of largest occupation), PBE reference, the three
-  lowest singlets and four lowest triplets declared to `prepare_delta`
-  and solved: the Delta methods are as close to exact Loewdin as on HF, or
-  closer. The largest deviation of the six excitation energies from `'lowdin'` is
-  6.3e-9 eV for `'linearized'`, 2.9e-4 eV for `'sa_remainder'`, 0.066 eV
-  for `'static_sa'` and 0.24 eV for `'static_mf'`; on HF it is 3.1e-7,
+- Benzene/cc-pVDZ, density-fitted SCF, the pi NO CAS(6,6) (canonical
+  occupied pi orbitals, the three virtual NOs of largest occupation), PBE
+  reference, the three lowest singlets and four lowest triplets declared
+  to `prepare_delta` and solved, `sigma='srg'` (the geometry of the QUEST
+  benchmark, not that of the table under [The Delta
+  methods](#the-delta-methods), which is a `sigma=None` model): the Delta
+  methods are as close to exact Loewdin as on HF, or closer. The largest
+  deviation of the six excitation energies from `'lowdin'` is 6.3e-9 eV
+  for `'linearized'`, 2.9e-4 eV for `'sa_remainder'`, 0.066 eV for
+  `'static_sa'` and 0.24 eV for `'static_mf'`; on HF it is 3.1e-7,
   3.2e-3, 0.12 and 0.84 eV (commit 0d914e0). This compares the methods
   with exact Loewdin on one model; it does not measure what the left-out
   coupling does to the energies.
@@ -1033,10 +1105,12 @@ molecules with `sigma='srg'` (runs of 2026-11-27, outside the tests):
   reference every variant lies below FCI. At 1.1 A the NO CAS(6,5) to
   CAS(6,8), with virtual NOs or with occupied NOs as well, lie 26.4 to
   36.0 mEh below it, with Delta and with Delta off alike, and the
-  canonical spaces of those sizes (where one does not cut a degenerate
-  pair), which have nothing to fold, 37.1 to 40.0 mEh below it; at 1.6 A
-  22.8 to 31.8 mEh (NO) and 31.1 to 39.6 mEh (canonical). On RHF the same NO spaces with Delta lie -2.1 to +7.0 mEh
-  from FCI at 1.1 A. The offset is there with Delta off and with
+  canonical spaces of those sizes (CAS(6,5) to CAS(6,7); the canonical
+  CAS(6,8) cuts a degenerate pair and is refused), which have nothing to
+  fold, 37.1 to 38.6 mEh below it; at 1.6 A 22.8 to 31.8 mEh (NO) and
+  31.1 to 39.6 mEh (canonical CAS(6,5), CAS(6,6) and CAS(6,8); the
+  canonical CAS(6,7) cuts a degenerate pair). On RHF the same NO spaces
+  with Delta lie -2.1 to +7.0 mEh from FCI at 1.1 A. The offset is there with Delta off and with
   canonical orbitals, so it is a property of the static downfolding on a
   hybrid reference, not of Delta.
 
@@ -1078,11 +1152,19 @@ is in place for them.
   less than 1e-4 (`ValueError`).
 - `df=False` with a basis (the rotation needs three-index factors) and
   `sigma_energies='qp'` with a basis (`NotImplementedError`);
-  `permuted_mf` of an active space with a basis (`ValueError`: QDPT would
-  take the rotated orbitals for canonical ones).
+  `run_low_level(..., df=False, natural_orbitals=True)`, refused by the run
+  before the RPA is solved, since every build on its natural orbitals would
+  be refused for the same reason (`NotImplementedError`); `permuted_mf` of
+  an active space with a basis (`ValueError`: QDPT would take the rotated
+  orbitals for canonical ones).
+- A basis with `spin_free=False` and `delta=True`, the default: the coupling
+  and the Delta solvers are written on the spatial active orbitals
+  (`NotImplementedError` from the build, before anything is built;
+  `delta=False` gives the static Hamiltonian over the spin orbitals). A
+  `delta` that is not `True` or `False` (`TypeError`), with a basis or
+  without.
 - In `h.solve`: a named `delta_method` on a record without a coupling
-  (`ValueError`: nothing to fold); every method but `False` on a record
-  built with `spin_free=False` (`NotImplementedError`); a dynamic method
+  (`ValueError`: nothing to fold); a dynamic method
   with a solver other than `'pyscf_fci'` (`ValueError`, naming the static
   forms); `'static_sa'` and `'sa_remainder'` without `prepare_delta`
   (`ValueError`); a dense method above the memory limit (`ValueError`,
@@ -1093,16 +1175,23 @@ is in place for them.
 
 - The hole side had never been run before this code; its checks are
   internal (the explicit P + Q matrix, the attachment moment).
-- `'sa_remainder'` is tested on benzene, N2 and water only, and its flag is
-  a heuristic threshold with a margin of 1.4 to 1.5 between the cases that
-  set it.
+- `'sa_remainder'` is tested on benzene, N2 and water only. Its flag,
+  `'delta_remainder_large'`, is a conservative heuristic: on five molecules
+  the corrections of the states that met the bar and of those that missed
+  it are a factor 1.08 apart (up to 1.40e-2 Ha, from 1.51e-2 Ha), and the
+  threshold, 1e-2 Ha, lies inside the passing range, so it has known false
+  positives (ethylene's lowest triplet; butadiene's third triplet and first
+  excited singlet by their excitation energies), and on them no state
+  that missed the bar went unflagged ([above](#choosing-the-delta-method)). A
+  criterion on the overlap of the states separated nothing; an estimate of
+  the second-order relaxation is future work.
 - The matrix-free linearized method of the prototype is not built (its cost,
   about 1,300 to 1,700 sigma vectors per root, may make it impractical), so
   above the reach of the dense methods no method follows the response of
   the wavefunction exactly.
 - Roots next to a pole, as in diffuse bases: flagged, not fixed.
 - A reference that is not HF: Delta folds the coupling of the rotation
-  only (above). On N2/6-31G at 1.1 A with PBE0 the totals lie 26 to 40
+  only (above). On N2/6-31G at 1.1 A with PBE0 the totals lie 26 to 39
   mEh below exact FCI, with Delta on or off and with canonical orbitals,
   an offset of the static downfolding on a hybrid reference that is not
   yet understood; a documented limitation, not a flag. It is the

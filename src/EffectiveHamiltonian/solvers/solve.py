@@ -407,6 +407,18 @@ def _pyscf_fci_uhf(r, out, spin_overlap):
 #: The backends that solve a spin-resolved g_eff (per-spin blocks).
 SPIN_RESOLVED_SOLVERS = {'pyscf_fci': _pyscf_fci_uhf}
 
+#: the entries of `out` that `solve` writes only where its solver and
+#: options give them: 'spin_square', and with sides the per-root Delta
+#: entries and every entry of a dynamic backend's `DeltaResult.extra`.
+#: Removed at the start of every solve that is given `out`, so that a
+#: reused `out` holds the last solve alone; 'e0', 'e_active' and
+#: 'numerical_flags' each solve writes itself.
+OPTIONAL_OUT_KEYS = (
+    'spin_square', 'static', 'correction', 'z', 'min_denominator',
+    'converged', 'static_index', 'crossing_unchecked', 'solutions_below',
+    'near_pole', 'above_pole', 'linearization_error', 'linearization_point',
+    'lanczos_change')
+
 
 @flags_into_out
 def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
@@ -564,8 +576,12 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     'near_pole' and 'lanczos_change' alone);
     an empty active space with sides reports static [0], correction [0],
     z [1], min_denominator [inf], converged [True], static_index [0],
-    crossing_unchecked [False].
+    crossing_unchecked [False]. A dict used for an earlier solve first
+    loses every entry of OPTIONAL_OUT_KEYS, so it holds this solve alone.
     """
+    if out is not None:
+        for key in OPTIONAL_OUT_KEYS:
+            out.pop(key, None)
     if solver not in SOLVERS:
         raise ValueError(f"solver={solver!r} is not a backend of this driver; "
                          f"choose one of {tuple(SOLVERS)}.")

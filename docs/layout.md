@@ -123,8 +123,12 @@ src/EffectiveHamiltonian/
     active_space.py            ActiveSpace: which canonical orbitals are
                                active, chosen by energy, irrep or population
     orbital_basis.py           orbital bases of the downfolding other than
-                               the canonical orbitals: the natural-orbital
-                               density blocks of the RPA run
+                               the canonical orbitals: NaturalDensity, the
+                               density blocks of the RPA run;
+                               OrbitalBasis and natural_orbital_basis, the
+                               natural orbitals; semicanonical_rotation,
+                               the Fock matrix made diagonal inside each
+                               block of an active space
     QDPT/                      active-space downfolding: generated MP2/MP3
                                diagram evaluators and the effective
                                Hamiltonian built from them

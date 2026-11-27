@@ -752,20 +752,43 @@ def test_backends_without_what_a_method_needs(h, monkeypatch):
         h.prepare_delta(((1, 0),), solver='nonsense')
 
 
-def test_spin_orbital_record_is_refused(low):
-    hs = build_effective_hamiltonian(low, no_space(low, 2, 2),
-                                     screening='crpa', spin_free=False)
-    assert hs.g_eff_is_static_part
-    for method in (None, 'lowdin', 'static_mf'):
-        with pytest.raises(NotImplementedError, match='spin_free'):
-            hs.solve('pyscf_fci', delta_method=method)
-    with pytest.raises(NotImplementedError, match='spin_free'):
-        hs.prepare_delta(((1, 0),))
-    with pytest.raises(NotImplementedError, match='spin_free'):
-        hs.static_hamiltonian('static_mf')
+def test_spin_orbital_build_with_delta_is_refused(low, monkeypatch):
+    """A rotated basis with spin_free=False and Delta on (the default) is
+    refused by the build, before the method's downfold and the coupling
+    run (NotImplementedError naming spin_free and delta=False), as an
+    unrestricted reference with a basis is. delta=False builds the static
+    Hamiltonian without a coupling: it solves without Delta, and a named
+    method has nothing to fold. Canonical orbitals with spin_free=False
+    build as before, whatever delta is."""
+    from src.EffectiveHamiltonian.Downfolding import effective_hamiltonian
+    from src.EffectiveHamiltonian.Downfolding.methods import rpa
+
+    def ran(*args, **kwargs):
+        raise AssertionError('the build ran before the refusal')
+    with monkeypatch.context() as patch:
+        patch.setattr(rpa, 'downfold', ran)
+        patch.setattr(effective_hamiltonian, 'fock_coupling', ran)
+        with pytest.raises(NotImplementedError,
+                           match='spin_free=False.*delta=False'):
+            build_effective_hamiltonian(low, no_space(low, 2, 2),
+                                        screening='crpa', spin_free=False)
     with pytest.warns(DeltaOffWarning):
-        e = hs.solve('pyscf_fci', delta_method=False)
+        hs = build_effective_hamiltonian(low, no_space(low, 2, 2),
+                                         screening='crpa', spin_free=False,
+                                         delta=False)
+    assert not hs.g_eff_is_static_part
+    for method in ('lowdin', 'static_mf'):
+        with pytest.raises(ValueError, match='nothing to fold'):
+            hs.solve('pyscf_fci', delta_method=method)
+    with pytest.raises(ValueError, match='nothing to fold'):
+        hs.prepare_delta(((1, 0),))
+    e = hs.solve('pyscf_fci', delta_method=False)
     assert np.isfinite(e[0])
+    norb = low.mf.mo_coeff.shape[1]
+    canonical = ActiveSpace.from_indices(norb, 5, [3, 4], [5, 6])
+    hc = build_effective_hamiltonian(low, canonical, screening='crpa',
+                                     spin_free=False)
+    assert hc.hybridization is None
 
 
 def test_build_numerics_reach_the_solver(low):
