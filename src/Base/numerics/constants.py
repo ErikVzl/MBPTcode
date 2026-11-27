@@ -379,6 +379,39 @@ DOWNFOLDING_SIGMA_TILE_GB = 0.25
 # that were accepted (differences of 0.006 to 0.010) and those called
 # near-degenerate (0.0012 and 0.0003).
 DOWNFOLDING_NO_CUT_WARN = 2e-3
+# Delta, the energy-dependent one-body term that folds the coupling of a
+# rotated basis (`solvers/dynamic_backends.py`). A root whose smallest
+# denominator |E - E_M -+ lam| over the pole weights is below this, in Ha,
+# runs with a DeltaNearPoleWarning: there the energy moves fast with E and
+# the root may belong to the environment state rather than to the active
+# one. 0.02 Ha is 0.5 eV, the scale of the Delta shifts themselves.
+DOWNFOLDING_DELTA_POLE_WARN = 0.02
+# Exact Loewdin iterates E until one step changes it by less than this, Ha:
+# far below the accuracy of the static Hamiltonian, and above the 1e-13 of
+# the FCI energies the iteration starts from.
+DOWNFOLDING_DELTA_CONV = 1e-8
+# At most this many Loewdin steps per root, then DeltaNotConverged; a root
+# away from a pole converges in a few (the map E -> E(E) contracts by the
+# Z factor's 1 - 1/Z).
+DOWNFOLDING_DELTA_MAX_ITER = 50
+# A pole (M, e) counts for the smallest denominator of a root c only where
+# its weight (b_e . <M|a|c>)^2 exceeds this: a pole the root does not see
+# moves nothing.
+DOWNFOLDING_DELTA_WEIGHT_FLOOR = 1e-8
+# Static states whose energies differ by less than this, Ha, are refined as
+# one degenerate set: their members share one E and come out of one
+# diagonalization, aligned to the states handed in, because following roots
+# one at a time by overlap is not defined inside a degenerate eigenspace
+# (N2 NO CAS(6,6), a pi -> pi* pair: both partners returned the same state,
+# overlap 0.98). The partners of a symmetry-degenerate state come from the
+# FCI engine within 1e-14 (N2: 5e-15), and the nearest state that is not a
+# partner was 1.1e-4 away; sharing one E errs by at most (1 - 1/Z) times the
+# spread of a set, below DOWNFOLDING_DELTA_CONV.
+DOWNFOLDING_DELTA_DEGENERATE = 1e-8
+# The memory, in GB, the dense Delta methods ('lowdin', 'linearized') may take
+# outside a Slurm job when numerics.layout.delta_dense_gb is None; inside one
+# the default is the share of the allocation (`allocation_max_memory_mb`).
+DOWNFOLDING_DELTA_DENSE_GB = 8.0
 
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.

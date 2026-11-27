@@ -75,6 +75,29 @@ class Coupling:
     blocks: tuple
     n_act_occ: int
 
+    def sides(self):
+        """The coupling as plain data for the dynamic backends of the
+        solvers package, [(kind, sigma, lam, b), ...]: kind 'particle' (an
+        electron leaves the active space into an environment virtual level
+        lam_virtual, b = b_particle) or 'hole' (an electron enters it from an
+        inactive occupied level lam_occupied, b = b_hole); b (n_act,
+        n_levels) with rows over every active orbital, zero where an orbital
+        has no coupling, its column e paired with lam[e]. sigma is None: the
+        Coupling of a restricted reference is one channel and its one side
+        serves both spins (a per-spin coupling would name its spin, 0 or 1,
+        when Delta exists for two channels). Only the blocks folded
+        (`blocks`) appear, and a side whose b is identically zero is left
+        out, so that no sector is built for it; no side at all means no
+        Delta."""
+        out = []
+        for name, kind, lam, b in (('av_ev', 'particle', self.lam_virtual,
+                                    self.b_particle),
+                                   ('ao_i', 'hole', self.lam_occupied,
+                                    self.b_hole)):
+            if name in self.blocks and np.any(b):
+                out.append((kind, None, lam, b))
+        return out
+
 
 def fock_coupling(mf, mo_rotated, T, eps, active_space,
                   blocks=COUPLING_BLOCKS, spin=None):

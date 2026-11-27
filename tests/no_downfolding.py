@@ -4,10 +4,14 @@ stands in for natural orbitals where there are none (`random_basis`, e.g.
 an unrestricted reference), the brute-force checks of their residual
 screening (`brute_force_vt`) and residual polarizability (`brute_force_pr`),
 and the dense oracle of the RPA correlation energy of a hybridized active
-space (`dense_drpa_ec`)."""
+space (`dense_drpa_ec`), N2 (`nitrogen`), whose pi and pi* orbitals give
+degenerate states, and the explicit P + Q matrix of the Delta solvers
+(`pq_spectrum`)."""
+import math
+
 import numpy as np
 import scipy.linalg
-from pyscf import dft, scf
+from pyscf import dft, fci, gto, scf
 from scipy.linalg import block_diag, cho_factor, cho_solve
 
 from src.Base.numerics.constants import DOWNFOLDING_NO_CUT_WARN
@@ -149,3 +153,85 @@ def dense_drpa_ec(delta, k, g=2):
     w = scipy.linalg.eig(np.block([[a, b], [-b, -a]]), right=False)
     assert np.abs(w.imag).max() < 1e-10
     return 0.5 * (np.sort(w.real)[len(delta):].sum() - np.trace(a))
+
+
+def nitrogen():
+    """N2/6-31G at 1.098 Angstrom, RHF with density fitting (pyscf's default
+    auxiliary basis): a molecule whose pi and pi* orbitals are degenerate
+    pairs, so that its active spaces hold doubly degenerate states."""
+    mol = gto.M(atom='N 0 0 0; N 0 0 1.098', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).density_fit()
+    mf.conv_tol = 1e-11
+    mf.verbose = 0
+    return mf.run()
+
+
+#: the pyscf operator that takes an electron of spin sigma out (particle
+#: side) or puts one in (hole side)
+_OPERATORS = {('particle', 0): fci.addons.des_a,
+              ('particle', 1): fci.addons.des_b,
+              ('hole', 0): fci.addons.cre_a, ('hole', 1): fci.addons.cre_b}
+
+
+def _fci_matrix(h1, eri, norb, nelec):
+    """The dense FCI matrix of the sector nelec = (n_alpha, n_beta), pyscf's
+    determinant order, column by column from direct_spin1.contract_2e."""
+    shape = (math.comb(norb, nelec[0]), math.comb(norb, nelec[1]))
+    n = shape[0] * shape[1]
+    h2e = fci.direct_spin1.absorb_h1e(h1, eri, norb, nelec, 0.5)
+    out = np.empty((n, n))
+    for k in range(n):
+        unit = np.zeros(n)
+        unit[k] = 1.0
+        out[:, k] = fci.direct_spin1.contract_2e(
+            h2e, unit.reshape(shape), norb, nelec).ravel()
+    return out
+
+
+def _operator_matrix(op, norb, nelec, u):
+    """The matrix of one pyscf creation or annihilation operator on orbital
+    u, from the sector nelec to the one it reaches."""
+    shape = (math.comb(norb, nelec[0]), math.comb(norb, nelec[1]))
+    n = shape[0] * shape[1]
+    cols = []
+    for k in range(n):
+        unit = np.zeros(n)
+        unit[k] = 1.0
+        cols.append(op(unit.reshape(shape), norb, nelec, u).ravel())
+    return np.array(cols).T
+
+
+def pq_spectrum(h1, eri, norb, nelec, sides):
+    """(energies, p_weights): the eigenvalues of the explicit P + Q matrix
+    of an active space coupled to environment levels, and the weight of each
+    eigenvector in P.
+
+    P is the FCI sector nelec of (h1, eri). `sides` are those of
+    `Coupling.sides()`, (kind, sigma, lam, b), sigma None for both spins.
+    Each kind, spin and level x adds the block H_M + lam_x (particle: the
+    sector with one electron of that spin less) or H_M - lam_x (hole: one
+    more), coupled to P by C = sum_u b[u, x] A_u, A_u the matrix of a_u
+    (particle) or a+_u (hole):
+
+        [[H_N, C^T], [C, blockdiag(H_M +- lam_x)]]
+
+    Built with pyscf directly, nothing of the Delta solvers."""
+    h_n = _fci_matrix(h1, eri, norb, nelec)
+    couplings, blocks = [], []
+    for kind, sigma, lam, b in sides:
+        for s in ((0, 1) if sigma is None else (sigma,)):
+            target = list(nelec)
+            target[s] += -1 if kind == 'particle' else 1
+            if not 0 <= target[s] <= norb:
+                continue
+            ops = [_operator_matrix(_OPERATORS[kind, s], norb, nelec, u)
+                   for u in range(norb)]
+            h_m = _fci_matrix(h1, eri, norb, tuple(target))
+            sign = 1.0 if kind == 'particle' else -1.0
+            for x in range(len(lam)):
+                couplings.append(sum(b[u, x] * ops[u] for u in range(norb)))
+                blocks.append(h_m + sign * lam[x] * np.eye(len(h_m)))
+    c = np.vstack(couplings)
+    full = np.block([[h_n, c.T], [c, block_diag(*blocks)]])
+    energies, vectors = np.linalg.eigh(full)
+    return energies, (vectors[:len(h_n)] ** 2).sum(0)

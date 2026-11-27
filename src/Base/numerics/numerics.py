@@ -52,6 +52,11 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DEFAULT_BROADENING_ETA,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
                                          DOWNFOLDING_CONTINUATION_MARGIN,
+                                         DOWNFOLDING_DELTA_CONV,
+                                         DOWNFOLDING_DELTA_DEGENERATE,
+                                         DOWNFOLDING_DELTA_MAX_ITER,
+                                         DOWNFOLDING_DELTA_POLE_WARN,
+                                         DOWNFOLDING_DELTA_WEIGHT_FLOOR,
                                          DOWNFOLDING_NO_CUT_WARN,
                                          DOWNFOLDING_POLE_MARGIN, DOWNFOLDING_SRG_S,
                                          EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
@@ -424,7 +429,23 @@ class LayoutNumerics:
     symmetric eigensolve (`eigh_device`: 'auto' takes a visible GPU at or above
     the solve's threshold, 'cpu' never, 'gpu' always). Recorded, and NOT in the
     identity: the bitwise gates fix them explicitly. sliced None takes a given
-    factorization's, else the whole factors on every rank."""
+    factorization's, else the whole factors on every rank.
+
+    delta_dense_gb: the memory, in GB, the dense Delta methods of the
+    downfolding ('lowdin' and 'linearized', `solvers/dynamic_backends.py`)
+    may take. It limits an estimate made before anything is allocated
+    (`dense_memory_gb`): 8 bytes times the eigenvectors of every sector with
+    one electron less (more), sum dim(M)^2, plus the largest
+    dim(M)^2 + 2 dim(M) dim(K) (one sector matrix in its diagonalization and
+    two amplitude slices), plus 4 dim(K)^2 ('lowdin') or 6 dim(K)^2
+    ('linearized') for the matrices of the sector of the states. What fills
+    it are the amplitudes <M|a_u|K>, built one orbital at a time; CAS(8,8)
+    with both sides needs about 2 GB, CAS(6,10) about 30 GB. Above the limit
+    the solve is refused and names 'sa_remainder'. None: inside a Slurm job
+    the share of the allocation that the BSE and Davidson solvers also take
+    (`allocation_max_memory_mb`), outside one DOWNFOLDING_DELTA_DENSE_GB
+    (8 GB). Set it as Numerics(layout={'delta_dense_gb': 32.0}); a positive
+    number or None."""
     tile_gb: Optional[float] = None
     fit_block: Optional[int] = None
     fit_gb: Optional[float] = None
@@ -433,6 +454,13 @@ class LayoutNumerics:
     block: Optional[int] = None
     device: str = 'cpu'
     eigh_device: str = 'auto'
+    delta_dense_gb: Optional[float] = None
+
+    def __post_init__(self):
+        if self.delta_dense_gb is not None and not (
+                math.isfinite(self.delta_dense_gb) and self.delta_dense_gb > 0):
+            raise ValueError(f'delta_dense_gb={self.delta_dense_gb!r}: a '
+                             'finite positive memory, GB, or None')
 
 
 @dataclass(frozen=True)
@@ -531,12 +559,31 @@ class DownfoldingNumerics:
     environment orbital whose occupations differ by less than this runs
     with a NearDegenerateCutWarning (below QP_DEGENERACY_TOL it is refused).
 
+    Delta, the energy-dependent term the dynamic backends solve
+    (`solvers/dynamic_backends.py`): delta_pole_warn, Hartree, a root whose
+    smallest denominator |E - E_M -+ lam| over the poles it sees is below
+    this runs with a DeltaNearPoleWarning; delta_conv, Hartree, exact
+    Loewdin stops when one step moves E by less; delta_max_iter, its most
+    steps per root, then DeltaNotConverged; delta_weight_floor, the pole
+    weight (b_e . <M|a|c>)^2 below which a pole does not count for the
+    smallest denominator; delta_degenerate, Hartree, static states closer
+    than this are refined together as one degenerate set. Their memory
+    limit is layout.delta_dense_gb.
+
     Refused when built: srg_s that is not a finite positive number or None,
-    and a negative pole_margin, continuation_margin or no_cut_warn."""
+    a negative pole_margin, continuation_margin, no_cut_warn,
+    delta_pole_warn, delta_weight_floor or delta_degenerate, a delta_conv
+    that is not positive, and a delta_max_iter that is not a positive
+    integer."""
     srg_s: Optional[float] = DOWNFOLDING_SRG_S
     pole_margin: float = DOWNFOLDING_POLE_MARGIN
     continuation_margin: float = DOWNFOLDING_CONTINUATION_MARGIN
     no_cut_warn: float = DOWNFOLDING_NO_CUT_WARN
+    delta_pole_warn: float = DOWNFOLDING_DELTA_POLE_WARN
+    delta_conv: float = DOWNFOLDING_DELTA_CONV
+    delta_max_iter: int = DOWNFOLDING_DELTA_MAX_ITER
+    delta_weight_floor: float = DOWNFOLDING_DELTA_WEIGHT_FLOOR
+    delta_degenerate: float = DOWNFOLDING_DELTA_DEGENERATE
 
     def __post_init__(self):
         if self.srg_s is not None and not (math.isfinite(self.srg_s)
@@ -553,6 +600,23 @@ class DownfoldingNumerics:
         if not self.no_cut_warn >= 0:
             raise ValueError(f'no_cut_warn={self.no_cut_warn!r}: a '
                              'non-negative difference of two occupations')
+        if not self.delta_pole_warn >= 0:
+            raise ValueError(f'delta_pole_warn={self.delta_pole_warn!r}: a '
+                             'non-negative distance to a pole, Hartree')
+        if not (math.isfinite(self.delta_conv) and self.delta_conv > 0):
+            raise ValueError(f'delta_conv={self.delta_conv!r}: a positive '
+                             'energy step, Hartree')
+        if (isinstance(self.delta_max_iter, bool)
+                or not isinstance(self.delta_max_iter, Integral)
+                or self.delta_max_iter < 1):
+            raise ValueError(f'delta_max_iter={self.delta_max_iter!r}: a '
+                             'positive number of steps')
+        if not self.delta_weight_floor >= 0:
+            raise ValueError(f'delta_weight_floor={self.delta_weight_floor!r}'
+                             ': a non-negative pole weight')
+        if not self.delta_degenerate >= 0:
+            raise ValueError(f'delta_degenerate={self.delta_degenerate!r}: a '
+                             'non-negative energy difference, Hartree')
 
 
 @dataclass(frozen=True)

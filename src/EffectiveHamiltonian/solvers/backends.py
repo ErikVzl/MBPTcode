@@ -1,4 +1,9 @@
-"""One interface behind every active-space many-body solver.
+"""One interface behind every active-space many-body solver: the static
+backends, which give the lowest states of a Hamiltonian. The dynamic
+backends, which refine those states with the energy-dependent one-body term
+Delta of a downfolding and take everything that touches a sector with one
+electron less or more from a static backend, are in dynamic_backends.py;
+that file imports this one, never the reverse.
 
 An active-space Hamiltonian is a one-body matrix h1 over spatial orbitals and a
 two-body tensor (pq|rs) in chemist notation with the eightfold permutation
@@ -12,10 +17,16 @@ and two-particle density matrices of a state in pyscf's make_rdm12 convention,
     E = sum_pq h1_pq dm1_qp + (1/2) sum_pqrs (pq|rs) dm2_pqrs,
 
 which is the pair a Hellmann-Feynman derivative of the active space contracts
-with. Four engines satisfy the interface: pyscf's FCI, the determinant basis
-of determinants.py (the only one that carries a three-body vertex),
-DMRG through block2, whose cost is polynomial in the number of orbitals at
-fixed bond dimension and so reaches active spaces the two exact engines cannot,
+with. Two class attributes say what an engine offers beyond `roots`, since
+the base-class methods raise and `hasattr` cannot tell: `has_rdms`, the
+spin-summed pair (dm1, dm2) above, and `has_sector_operations`, the dense
+matrix and the product of one (n_alpha, n_beta) sector and the creation and
+annihilation of one electron (`sector_matrix`, `sector_product`, `create`,
+`annihilate`), which a dynamic backend needs of its engine. Four engines
+satisfy the interface: pyscf's FCI, the determinant basis of determinants.py
+(the only one that carries a three-body vertex), DMRG through block2, whose
+cost is polynomial in the number of orbitals at fixed bond dimension and so
+reaches active spaces the two exact engines cannot,
 and high-order coupled cluster (CCSDT, CCSDTQ) on a Hartree-Fock reference in
 the active space, a ground-state energy per spin sector at a cost polynomial in
 the number of orbitals and electrons.
@@ -49,6 +60,10 @@ class ActiveSpaceSolver:
     """
 
     max_roots = None
+    #: `rdms` returns the spin-summed pair (dm1, dm2)
+    has_rdms = False
+    #: `sector_matrix`, `sector_product`, `annihilate` and `create` exist
+    has_sector_operations = False
 
     def roots(self, h1, eri, norb, nelec, nroots=1, spin=0):
         """(energies, vectors): the lowest nroots states of the spin sector, ecore = 0.
@@ -63,6 +78,31 @@ class ActiveSpaceSolver:
     def rdms(self, vector, norb, nelec, spin=0):
         """(dm1, dm2) of one root, pyscf's make_rdm12 convention."""
         raise NotImplementedError
+
+    def sector_matrix(self, h1, eri, norb, nelec):
+        """The dense matrix of (h1, eri) in the sector nelec = (n_alpha,
+        n_beta), in the engine's determinant order, ecore = 0."""
+        raise NotImplementedError(f'{type(self).__name__} has no sector '
+                                  f'operations')
+
+    def sector_product(self, h1, eri, norb, nelec):
+        """The function v -> H v of the sector nelec, on the engine's CI
+        arrays of that sector (as `annihilate` returns them)."""
+        raise NotImplementedError(f'{type(self).__name__} has no sector '
+                                  f'operations')
+
+    def annihilate(self, vector, norb, nelec, orbital, sigma):
+        """a_{orbital, sigma} applied to a CI array of the sector nelec: the
+        CI array of the sector with one electron of spin sigma (0 alpha,
+        1 beta) less."""
+        raise NotImplementedError(f'{type(self).__name__} has no sector '
+                                  f'operations')
+
+    def create(self, vector, norb, nelec, orbital, sigma):
+        """a+_{orbital, sigma} applied to a CI array of the sector nelec: the
+        CI array of the sector with one electron of spin sigma more."""
+        raise NotImplementedError(f'{type(self).__name__} has no sector '
+                                  f'operations')
 
     def _check_roots(self, nroots):
         """Refuse a request the engine cannot fill."""
@@ -79,9 +119,16 @@ class PyscfFCISolver(ActiveSpaceSolver):
     are the even-S states and a singlet request gets singlets; direct_spin1
     fixes Sz alone and returns every state of that projection, which is what
     spin=None asks for.
+
+    The sector operations work on direct_spin1's CI arrays, (alpha strings,
+    beta strings) in pyscf's string order, and serve the dynamic backends
+    (dynamic_backends.py): a sector with one electron less or more is
+    another (n_alpha, n_beta) pair, at fixed Sz and without spin adaptation.
     """
 
     max_roots = None
+    has_rdms = True
+    has_sector_operations = True
 
     def __init__(self, conv_tol=FCI_CONV_TOL, spin_penalty=None):
         """spin_penalty: None, or the shift (Eh) of pyscf's
@@ -122,6 +169,78 @@ class PyscfFCISolver(ActiveSpaceSolver):
     def rdms(self, vector, norb, nelec, spin=0):
         return fci.direct_spin1.make_rdm12(vector, norb, spin_sector(nelec, spin))
 
+    def sector_matrix(self, h1, eri, norb, nelec):
+        """The dense FCI matrix of the sector nelec, pyscf's determinant
+        order (alpha string major), built column by column from
+        `sector_product`; [[0.0]] for no electron at all."""
+        shape = sector_shape(norb, nelec)
+        n = shape[0] * shape[1]
+        if sum(nelec) == 0:
+            return np.zeros((n, n))
+        product = self.sector_product(h1, eri, norb, nelec)
+        out = np.empty((n, n))
+        unit = np.zeros(n)
+        for k in range(n):
+            unit[k] = 1.0
+            out[:, k] = product(unit.reshape(shape)).ravel()
+            unit[k] = 0.0
+        return out
+
+    def sector_product(self, h1, eri, norb, nelec):
+        """v -> H v in the sector nelec, direct_spin1.absorb_h1e and
+        contract_2e. absorb_h1e divides the one-body part by the electron
+        count, so the absorbed tensor is built here, per sector. v is a CI
+        array of the sector (2D, or its ravel); H v has the shape of v."""
+        nelec = (int(nelec[0]), int(nelec[1]))
+        if sum(nelec) == 0:
+            return lambda v: np.zeros_like(v)
+        h2e = fci.direct_spin1.absorb_h1e(h1, eri, norb, nelec, 0.5)
+        shape = sector_shape(norb, nelec)
+
+        def product(v):
+            v = np.asarray(v)
+            return fci.direct_spin1.contract_2e(
+                h2e, v.reshape(shape), norb, nelec).reshape(v.shape)
+        return product
+
+    def annihilate(self, vector, norb, nelec, orbital, sigma):
+        """fci.addons.des_a (sigma 0) or des_b (sigma 1). pyscf returns zeros
+        in the input's shape when there is no electron of that spin to
+        remove; this returns the changed sector's shape, which then has a
+        zero dimension."""
+        return _one_electron(fci.addons.des_a if sigma == 0 else
+                             fci.addons.des_b, -1, vector, norb, nelec,
+                             orbital, sigma)
+
+    def create(self, vector, norb, nelec, orbital, sigma):
+        """fci.addons.cre_a (sigma 0) or cre_b (sigma 1); a full spin gives
+        the changed sector's shape with a zero dimension, as `annihilate`."""
+        return _one_electron(fci.addons.cre_a if sigma == 0 else
+                             fci.addons.cre_b, +1, vector, norb, nelec,
+                             orbital, sigma)
+
+
+def sector_shape(norb, nelec):
+    """(alpha strings, beta strings) of the sector nelec in norb orbitals;
+    a count outside 0..norb has no strings."""
+    return tuple(math.comb(norb, int(n)) if 0 <= n <= norb else 0
+                 for n in nelec)
+
+
+def _one_electron(op, step, vector, norb, nelec, orbital, sigma):
+    """The pyscf operator `op` on spin sigma of `vector` (sector nelec) as
+    the 2D CI array of the sector whose sigma count moves by `step`."""
+    if sigma not in (0, 1):
+        raise ValueError(f'sigma={sigma!r}: 0 (alpha) or 1 (beta)')
+    nelec = (int(nelec[0]), int(nelec[1]))
+    target = list(nelec)
+    target[sigma] += step
+    shape = sector_shape(norb, target)
+    vector = np.asarray(vector).reshape(sector_shape(norb, nelec))
+    if 0 in shape:
+        return np.zeros(shape)
+    return op(vector, norb, nelec, orbital)
+
 
 class PyscfSpinResolvedFCISolver(ActiveSpaceSolver):
     """pyscf's fci.direct_uhf: a Hamiltonian whose alpha and beta blocks
@@ -132,6 +251,9 @@ class PyscfSpinResolvedFCISolver(ActiveSpaceSolver):
     (pq|rs) = (qp|rs) = (pq|sr), which direct_uhf assumes when it packs them.
     No spin adaptation: in spin-polarized orbitals the Hamiltonian conserves
     S_z alone, so the roots are the lowest states at that S_z, of any spin.
+    Its `rdms` are per spin, not the spin-summed pair, so `has_rdms` stays
+    False (until D_SA exists for two channels), and it has no sector
+    operations.
     """
 
     max_roots = None
@@ -255,6 +377,7 @@ class Block2DMRGSolver(ActiveSpaceSolver):
     """
 
     max_roots = None
+    has_rdms = True
 
     def __init__(self, bond_dim=DMRG_BOND_DIM, n_sweeps=DMRG_N_SWEEPS,
                  tol=FCI_CONV_TOL, noise=DMRG_NOISE,

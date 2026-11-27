@@ -89,6 +89,7 @@ pytest test_downfolding_no_sigma.py
 pytest test_downfolding_no_coupling.py
 pytest test_downfolding_no_energy.py
 pytest test_downfolding_no_two_channels.py
+pytest test_downfolding_no_delta_dense.py
 pytest test_downfolding_qp.py
 pytest test_downfolding_reference.py
 pytest test_downfolding_routes.py
