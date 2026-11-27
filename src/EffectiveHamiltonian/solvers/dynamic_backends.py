@@ -25,16 +25,38 @@ summed explicitly. Two dense methods, on the full spectrum of every sector
 (`dense_memory_gb` is what that costs; above `dense_memory_limit_gb` a solve
 is refused and names 'sa_remainder'):
 
-- 'lowdin' (`LowdinSolver`): per state, E <- the eigenvalue of H_eff(E)
-  whose vector overlaps most with the previous one, to self-consistency;
+- 'lowdin' (`LowdinSolver`), exact Loewdin, the reference: per state,
+  E <- the eigenvalue of H_eff(E) whose vector overlaps most with the
+  previous one, until E is self-consistent. Its converged energy is the
+  exact eigenvalue of the active space coupled to the environment levels
+  (the explicit P + Q matrix), however strong the coupling. It iterates, and
+  next to a pole the iteration can oscillate or wander and stop without
+  converging (DeltaNotConverged, 'delta_not_converged'; the last energy is
+  kept).
 - 'linearized' (`LinearizedLowdinSolver`): per state a Z-estimate E0, then
-  the generalized eigenproblem (H_N + D0 - E0 D1) c = E (1 - D1) c with
-  D0 = H_eff(E0) - H_N and D1 = dH_eff/dE(E0).
+  one generalized eigenproblem (H_N + D0 - E0 D1) c = E (1 - D1) c with
+  D0 = H_eff(E0) - H_N and D1 = dH_eff/dE(E0). It does not iterate, so it
+  always returns. H_eff(E) is replaced by its tangent at E0, so the result
+  is exact to first order in E - E0: for a weakly coupled state (Z close to
+  1) E0 lies close to the self-consistent energy and the error is second
+  order; as Z drops, E0 moves away and the error grows quickly. Each root
+  carries the estimate Z |<c|H_eff(E)|c> - E| of its error in
+  extra['linearization_error'], and one above
+  numerics.downfolding.delta_linearization_warn raises
+  DeltaLinearizationWarning, 'delta_linearization': for that root use
+  'lowdin'.
 
 Each root reports its static energy, Z = 1 / (1 - <c|dH_eff(E)|c>) and the
-smallest denominator |E - E_M -+ lam| over the poles it sees; one below
-numerics.downfolding.delta_pole_warn raises DeltaNearPoleWarning and the
-flag 'delta_near_pole'. The algebra is the kernel `delta_roots`, on dense
+smallest denominator |E - E_M -+ lam| over the poles it sees (weight
+above delta_weight_floor). Three verdicts flag a root, whatever the method:
+a denominator below numerics.downfolding.delta_pole_warn, or for
+'linearized' a linearization point E0 that close to a pole of the states
+handed in (DeltaNearPoleWarning, 'delta_near_pole': the energy moves fast
+with E there); Z below QP_WINDOW_Z_MIN (DeltaNearPoleWarning,
+'delta_satellite': the root is mostly environment, not a state of the
+active space); and the linearization error above (linearized only). A
+denominator smaller than delta_conv is evaluated at that size, so a root on
+a pole is finite, never inf or NaN. The algebra is the kernel `delta_roots`, on dense
 arrays only, which knows neither the engine nor the spin structure of the
 integrals: it is tested with two spin channels and both kinds of side on a
 model.
@@ -47,7 +69,8 @@ import scipy.linalg
 
 from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (BYTES_PER_GB,
-                                         DOWNFOLDING_DELTA_DENSE_GB, MB_PER_GB)
+                                         DOWNFOLDING_DELTA_DENSE_GB, MB_PER_GB,
+                                         QP_WINDOW_Z_MIN)
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
 from src.EffectiveHamiltonian.solvers.backends import sector_shape
@@ -57,10 +80,23 @@ DENSE_MATRICES = {'lowdin': 4, 'linearized': 6}
 
 
 class DeltaNearPoleWarning(RuntimeWarning):
-    """A root of a Delta solve whose smallest denominator |E - E_M -+ lam|
-    over the poles it sees is below numerics.downfolding.delta_pole_warn:
-    the energy is finite, but it moves fast with E there, and the root may
-    belong to the environment state rather than to the active one."""
+    """A root of a Delta solve next to a pole, two flags.
+    'delta_near_pole': its smallest denominator |E - E_M -+ lam| over the
+    poles it sees, or for 'linearized' that of its linearization point E0,
+    is below numerics.downfolding.delta_pole_warn; the energy is finite, but
+    it moves fast with E there, and the root may belong to the environment
+    state rather than to the active one. 'delta_satellite': its Z is below
+    QP_WINDOW_Z_MIN, so it is mostly environment, a satellite, not a state
+    of the active space."""
+
+
+class DeltaLinearizationWarning(RuntimeWarning):
+    """A root of linearized Loewdin whose estimated linearization error,
+    Z |<c|H_eff(E)|c> - E|, is above
+    numerics.downfolding.delta_linearization_warn: the state is coupled
+    strongly enough (Z well below 1) that one linearization of H_eff(E) does
+    not reach its self-consistent energy. Exact Loewdin
+    (delta_method='lowdin') gives the exact value."""
 
 
 class DeltaNotConverged(RuntimeWarning):
@@ -79,7 +115,10 @@ class DeltaResult:
     whose weight (b_e . <M|a|c>)^2 exceeds delta_weight_floor (inf where
     none does); vectors: one array per root, of the shape the vector handed
     in had, unit Euclidean norm; converged (nroots,) bool; extra: what one
-    method reports beyond these."""
+    method reports beyond these. 'linearized' reports
+    extra['linearization_error'] (nroots,), its error estimate
+    Z |<c|H_eff(E)|c> - E| in Ha, and extra['linearization_point']
+    (nroots,), the E0 each root was linearized at."""
     energies: np.ndarray
     static: np.ndarray
     z: np.ndarray
@@ -123,9 +162,10 @@ def dense_memory_limit_gb(numerics):
 
 # ----------------------------------------------------------------- the kernel
 class _Sector:
-    """One entry of `sectors` with the rows of b that couple."""
+    """One entry of `sectors` with the rows of b that couple; `resolution`,
+    the smallest denominator Delta resolves (`delta`)."""
 
-    def __init__(self, kind, e_m, amp, lam, b):
+    def __init__(self, kind, e_m, amp, lam, b, resolution):
         if kind not in ('particle', 'hole'):
             raise ValueError(f"kind={kind!r}: 'particle' or 'hole'")
         self.sign = 1.0 if kind == 'particle' else -1.0
@@ -134,6 +174,7 @@ class _Sector:
         b = np.asarray(b, dtype=float)
         self.rows = np.flatnonzero(np.any(b != 0.0, axis=1))
         self.b = b[self.rows]
+        self.resolution = resolution
 
     def denominators(self, energy):
         """E - E_M - lam (particle) or E - E_M + lam (hole), (dim M, n_lev)."""
@@ -141,8 +182,16 @@ class _Sector:
 
     def delta(self, energy, derivative):
         """Delta_tu(E - E_M) over the coupled rows, (dim M, r, r); its
-        derivative in E with `derivative`."""
+        derivative in E with `derivative`. A denominator smaller in size than
+        `resolution` (delta_conv: E itself is known no better) is taken at
+        that size, with its sign (+ for an exact zero), so that a root on a
+        pole gives a finite Delta, which the smallest denominator reports,
+        and never inf or NaN."""
         den = self.denominators(energy)
+        small = np.abs(den) < self.resolution
+        if np.any(small):
+            den = np.where(small, np.where(den < 0, -self.resolution,
+                                           self.resolution), den)
         r = -1.0 / den ** 2 if derivative else 1.0 / den
         return np.einsum('me,te,ue->mtu', r, self.b, self.b, optimize=True)
 
@@ -233,14 +282,22 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics):
         return DeltaResult(static.copy(), static, np.ones(n), np.full(n, np.inf),
                            [v.reshape(s) for v, s in zip(flat, shapes)],
                            np.ones(n, dtype=bool))
-    sectors = [_Sector(*s) for s in sectors]
+    sectors = [_Sector(*s, settings.delta_conv) for s in sectors]
     h_n = np.asarray(h_n, dtype=float)
     solve = _lowdin if method == 'lowdin' else _linearized
     out_e, out_c, converged = np.empty(n), [None] * n, np.ones(n, dtype=bool)
+    point, point_distance = np.full(n, np.nan), np.full(n, np.inf)
     for members in degenerate_sets(static, numerics):
         starts = np.column_stack([flat[k] for k in members])
-        e_set, c_set, ok = solve(h_n, sectors, static[members], starts,
-                                 settings)
+        e_set, c_set, ok, e0 = solve(h_n, sectors, static[members], starts,
+                                     settings)
+        if e0 is not None:
+            # the linearization point, and how close it lies to a pole the
+            # states handed in see
+            point[members] = e0
+            point_distance[members] = [
+                _min_denominator(sectors, e0, k, settings.delta_weight_floor)
+                for k in starts.T]
         for i, k in enumerate(members):
             c = c_set[:, i] / np.linalg.norm(c_set[:, i])
             out_e[k], out_c[k], converged[k] = e_set[i], (
@@ -258,16 +315,45 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics):
     smallest = np.array([_min_denominator(sectors, e, c,
                                           settings.delta_weight_floor)
                          for e, c in zip(out_e, out_c)])
-    for k in np.flatnonzero(smallest < settings.delta_pole_warn):
+    extra = {}
+    if method == 'linearized':
+        # Z |<c|H_eff(E)|c> - E|: the residual of the root in the exact
+        # H_eff(E), turned into an energy by the Newton step of Loewdin
+        residual = np.array([float(c @ h_n @ c)
+                             + _expectation(sectors, e, c, False) - e
+                             for e, c in zip(out_e, out_c)])
+        extra = {'linearization_error': z * np.abs(residual),
+                 'linearization_point': point}
+    near = (smallest < settings.delta_pole_warn) | (
+        point_distance < settings.delta_pole_warn)
+    for k in np.flatnonzero(near):
+        where = (f'lies {smallest[k]:.2e} Ha from a pole E_M -+ lam'
+                 if smallest[k] < settings.delta_pole_warn else
+                 f'was linearized at {point[k]:.8f}, '
+                 f'{point_distance[k]:.2e} Ha from a pole E_M -+ lam')
         flag('delta_near_pole',
-             f'Delta ({method}): state {k} at {out_e[k]:.8f} lies '
-             f'{smallest[k]:.2e} Ha from a pole E_M -+ lam (below '
+             f'Delta ({method}): state {k} at {out_e[k]:.8f} {where} (below '
              f'delta_pole_warn = {settings.delta_pole_warn} Ha); the energy '
-             f'is finite, and may belong to the environment state',
-             DeltaNearPoleWarning)
+             f'is finite, but it moves fast with E there and may belong to '
+             f'the environment state', DeltaNearPoleWarning)
+    for k in np.flatnonzero(z < QP_WINDOW_Z_MIN):
+        flag('delta_satellite',
+             f'Delta ({method}): state {k} at {out_e[k]:.8f} has Z = '
+             f'{z[k]:.3f}, below {QP_WINDOW_Z_MIN}: it is mostly environment, '
+             f'a satellite, not a state of the active space', DeltaNearPoleWarning)
+    for k in np.flatnonzero(extra.get('linearization_error', np.zeros(n))
+                            > settings.delta_linearization_warn):
+        flag('delta_linearization',
+             f'Delta (linearized): state {k} at {out_e[k]:.8f} has an '
+             f'estimated linearization error of '
+             f'{extra["linearization_error"][k]:.1e} Ha (Z |<c|H_eff(E)|c> - '
+             f'E|), above delta_linearization_warn = '
+             f'{settings.delta_linearization_warn} Ha; '
+             f"delta_method='lowdin' gives the exact value",
+             DeltaLinearizationWarning)
     return DeltaResult(out_e, static, z, smallest,
                        [c.reshape(s) for c, s in zip(out_c, shapes)],
-                       converged)
+                       converged, extra)
 
 
 def degenerate_sets(energies, numerics):
@@ -305,7 +391,7 @@ def _select(values, vecs, overlaps):
 
 
 def _lowdin(h_n, sectors, energies, starts, settings):
-    """(energies, vectors, converged) of one degenerate set (one state, or
+    """(energies, vectors, converged, None) of one degenerate set (one state, or
     the partners of a degenerate one), starts (dim K, n): at the set's
     common E, the n eigenvalues of H_eff(E) whose vectors overlap most with
     the previous ones, E their mean, until one step moves E by less than
@@ -324,11 +410,11 @@ def _lowdin(h_n, sectors, energies, starts, settings):
         if abs(step) < settings.delta_conv:
             converged = True
             break
-    return found, previous, converged
+    return found, previous, converged, None
 
 
 def _linearized(h_n, sectors, energies, starts, settings):
-    """(energies, vectors, True) of one degenerate set, starts (dim K, n):
+    """(energies, vectors, True, E0) of one degenerate set, starts (dim K, n):
     the Z-estimate E0 = E_K + g / (1 - g') (the mean over the set), then the
     n roots of (H_N + D0 - E0 D1) c = E (1 - D1) c with the largest weight
     <c|(1 - D1)|K> on the states handed in."""
@@ -347,7 +433,7 @@ def _linearized(h_n, sectors, energies, starts, settings):
                                      overwrite_b=True)
     del a, metric
     found, vectors = _select(values, vecs, vecs.T @ target)
-    return found, vectors, True
+    return found, vectors, True, e0
 
 
 # ------------------------------------------------------------ the backends
@@ -471,10 +557,20 @@ def _selection(op, norb, nelec, orbital, sigma, dim_m):
 
 
 class LowdinSolver(EnergyDependentSolver):
-    """Exact Loewdin: per state, E <- the eigenvalue of H_eff(E) whose vector
-    overlaps most with the previous one, until one step moves E by less
-    than delta_conv (at most delta_max_iter steps, then DeltaNotConverged).
-    Dense: the full spectrum of every sector with one electron less (more)."""
+    """Exact Loewdin, the reference method: per state, E <- the eigenvalue of
+    H_eff(E) whose vector overlaps most with the previous one, until one
+    step moves E by less than delta_conv. A degenerate set is refined
+    together (`delta_roots`).
+
+    Reliable whenever it converges: the energy is then an exact eigenvalue
+    of the active space coupled to the environment levels, at any strength
+    of the coupling. It can fail to converge next to a pole, where H_eff(E)
+    changes fast with E: after delta_max_iter steps the last energy is kept
+    with DeltaNotConverged and the flag 'delta_not_converged'. Like every
+    root, a root near a pole is flagged 'delta_near_pole', and one with
+    Z below QP_WINDOW_Z_MIN 'delta_satellite'. Dense: the full spectrum of
+    every sector with one electron less (more), one diagonalization of the
+    sector of the states per step."""
     method = 'lowdin'
 
 
@@ -483,7 +579,22 @@ class LinearizedLowdinSolver(EnergyDependentSolver):
     H_N|K> and g' = <K|dH_eff(E_K)|K>, then one generalized eigenproblem
     (H_N + D0 - E0 D1) c = E (1 - D1) c, D0 = H_eff(E0) - H_N and
     D1 = dH_eff(E0), and the root with the largest <c|(1 - D1)|K>. Dense,
-    as `LowdinSolver`; not iterative."""
+    as `LowdinSolver`; not iterative, so it always returns.
+
+    When it is reliable: H_eff(E) is replaced by its tangent at E0, so the
+    energy is exact to first order in E - E0. For a weakly coupled state,
+    Z close to 1, E0 is close to the self-consistent energy and the error is
+    second order, far below any chemical scale; as Z drops (a state that
+    leaks strongly into the environment) E0 moves away and the error grows
+    quickly. Each root's estimate Z |<c|H_eff(E)|c> - E|, the residual of
+    the root in the exact H_eff(E) turned into an energy by one Newton step,
+    is in extra['linearization_error']; above
+    numerics.downfolding.delta_linearization_warn the root is flagged
+    'delta_linearization' (DeltaLinearizationWarning), and 'lowdin' gives
+    its exact value. A linearization point within delta_pole_warn of a pole
+    is flagged 'delta_near_pole': the tangent is then taken where H_eff(E)
+    bends most, and the root may be a satellite ('delta_satellite', Z below
+    QP_WINDOW_Z_MIN)."""
     method = 'linearized'
 
 

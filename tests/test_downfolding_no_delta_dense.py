@@ -4,12 +4,16 @@ and the two dense dynamic backends of `solvers/dynamic_backends.py`, exact
 Loewdin (`LowdinSolver`) and linearized Loewdin (`LinearizedLowdinSolver`).
 
 Water/6-31G RHF on an NO CAS(4,4): the Loewdin roots are eigenvalues of the
-explicit P + Q matrix (`pq_spectrum` in `tests/no_downfolding.py`), the
-linearized roots follow them, a zero coupling gives the static spectrum and
-Z = 1, 0 < Z <= 1, a level next to a pole is flagged and finite, no active
-virtual means no Delta. N2/6-31G on an NO CAS(6,6): the two partners of a
-degenerate state come out with one energy and as two different states, and
-the memory estimate bounds the tracemalloc peak. The kernel `delta_roots` on
+explicit P + Q matrix (`pq_spectrum` in `tests/no_downfolding.py`); the
+linearized ground state follows them, the strongly coupled excited states
+are flagged 'delta_linearization' with an estimate that measures their gap;
+a zero coupling gives the static spectrum and Z = 1, 0 < Z <= 1; the
+strongest pole next to the ground state gives exactly the flags of each
+method ('delta_near_pole', for linearized also at its linearization point,
+'delta_satellite'), a root exactly on a pole stays finite; no active virtual
+means no Delta. N2/6-31G on an NO CAS(6,6): linearized follows Loewdin, the
+two partners of a degenerate state come out with one energy and as two
+different states, and the memory estimate bounds the tracemalloc peak. The kernel `delta_roots` on
 a model with two spin channels and both kinds of side; the pairing of the
 columns of b with their levels against the Fock blocks on PBE; the capability
 markers, the refusal of an engine without sector operations and of a solve
@@ -18,6 +22,7 @@ import ast
 import math
 import pathlib
 import tracemalloc
+import warnings
 
 import numpy as np
 import pytest
@@ -33,8 +38,9 @@ from src.EffectiveHamiltonian.solvers.backends import (
     Block2DMRGSolver, CoupledClusterSolver, ExactDiagonalizationSolver,
     PyscfFCISolver, PyscfSpinResolvedFCISolver)
 from src.EffectiveHamiltonian.solvers.dynamic_backends import (
-    DYNAMIC_METHODS, DeltaNearPoleWarning, LinearizedLowdinSolver,
-    LowdinSolver, delta_roots, dense_memory_gb, dense_memory_limit_gb)
+    DYNAMIC_METHODS, DeltaLinearizationWarning, DeltaNearPoleWarning,
+    DeltaNotConverged, LinearizedLowdinSolver, LowdinSolver, delta_roots,
+    dense_memory_gb, dense_memory_limit_gb)
 from tests.no_downfolding import nitrogen, no_space, pq_spectrum, water
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -69,12 +75,31 @@ def case(low):
     return h1, eri, h.hybridization.sides(), engine, E, V
 
 
+def _refine(method, engine, sides, h1, eri, norb, nelec, E, V):
+    """(result, flags, warnings) of one refine: the flags it raised, as
+    [(name, message)], and the classes of the warnings it issued, every one
+    recorded here so that the output stays clean and each test asserts
+    exactly what it expects."""
+    flags = []
+    with collecting(flags), warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        res = DYNAMIC_METHODS[method](engine, sides).refine(h1, eri, norb,
+                                                            nelec, E, V)
+    return (res, [(f['flag'], f['message']) for f in flags],
+            [w.category for w in caught])
+
+
 @pytest.fixture(scope='module')
-def results(case):
+def solved(case):
+    """{method: (result, flags, warnings)} of the water states."""
     h1, eri, sides, engine, E, V = case
-    return {m: DYNAMIC_METHODS[m](engine, sides).refine(h1, eri, 4, (2, 2),
-                                                        E, V)
+    return {m: _refine(m, engine, sides, h1, eri, 4, (2, 2), E, V)
             for m in DYNAMIC_METHODS}
+
+
+@pytest.fixture(scope='module')
+def results(solved):
+    return {m: out[0] for m, out in solved.items()}
 
 
 @pytest.fixture(scope='module')
@@ -174,25 +199,51 @@ def test_lowdin_with_a_hole_side_is_a_pq_eigenvalue(case):
         assert abs(e[k] - x) < 1e-8 and w[k] > 0.5
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'water NO CAS(4,4) couples its active virtuals strongly (Z 0.64 and '
-    '0.72 for the excited states): linearized - lowdin measured 1.7e-2 Ha, '
-    'the bar is 1e-6; reported for a ruling'))
-def test_linearized_follows_lowdin(results):
-    """Measured on 2026-11-27: |linearized - lowdin| = 1.8e-13, 1.6e-3 and
-    1.7e-2 Ha over the three states (Z 0.9998, 0.72, 0.64). The Z-estimate
-    E0 from the static state lies 0.06 and 0.15 Ha from the Loewdin energy
-    of the excited states; linearized at the Loewdin energy itself the
-    generalized problem gives it back to 3e-9. Fails the bar of the brief."""
-    diff = np.abs(results['linearized'].energies
-                  - results['lowdin'].energies).max()
-    print(f'linearized - lowdin: {diff:.1e} Ha')
+def test_linearized_ground_state_follows_lowdin(solved):
+    """Water: the ground state (Z close to 1) agrees with Loewdin to 1e-6
+    and raises no 'delta_linearization'. Measured on 2026-11-27:
+    |linearized - lowdin| 1.8e-13 Ha, estimate 1.8e-13 Ha (Z 0.9998)."""
+    lin, flags, _ = solved['linearized']
+    low = solved['lowdin'][0]
+    diff = abs(lin.energies[0] - low.energies[0])
+    print(f'water ground state: linearized - lowdin {diff:.1e} Ha, '
+          f'estimate {lin.extra["linearization_error"][0]:.1e}')
     assert diff < 1e-6
+    assert not any(name == 'delta_linearization' and 'state 0 ' in text
+                   for name, text in flags)
+
+
+def test_linearized_excited_states_are_flagged(solved):
+    """Water NO CAS(4,4) couples its active virtuals strongly: the two
+    excited states (Z about 0.7 and 0.64) are flagged 'delta_linearization',
+    and the estimate Z |<c|H_eff(E)|c> - E| measures the gap to Loewdin.
+    Measured on 2026-11-27 (|linearized - lowdin|, estimate, Z): state 1
+    1.56e-3, 1.56e-3, 0.72; state 2 1.68e-2, 1.66e-2, 0.63. The estimate
+    is within 1% of the gap; asserted within 10%."""
+    lin, flags, caught = solved['linearized']
+    low = solved['lowdin'][0]
+    gap = np.abs(lin.energies - low.energies)
+    estimate = lin.extra['linearization_error']
+    for k in range(3):
+        print(f'water state {k}: |linearized - lowdin| {gap[k]:.2e}, '
+              f'estimate {estimate[k]:.2e}, Z {lin.z[k]:.3f}')
+    flagged = sorted(int(text.split('state ')[1].split()[0])
+                     for name, text in flags if name == 'delta_linearization')
+    assert flagged == [1, 2]
+    assert DeltaLinearizationWarning in caught
+    assert {name for name, _ in flags} == {'delta_linearization'}
+    warn = Numerics().downfolding.delta_linearization_warn
+    assert np.all(estimate[1:] > warn) and estimate[0] < warn
+    ratio = estimate[1:] / gap[1:]
+    assert np.all(ratio > 0.9) and np.all(ratio < 1.1)
+    # Loewdin is the reference and raises nothing here
+    assert solved['lowdin'][1] == [] and solved['lowdin'][2] == []
 
 
 def test_linearized_follows_lowdin_on_n2(n2):
     """N2 NO CAS(6,6), the lowest eight states at (3, 3), Z 0.94 to 0.998.
-    Measured on 2026-11-27: max |linearized - lowdin| = 7.1e-9 Ha."""
+    Measured on 2026-11-27: max |linearized - lowdin| = 7.1e-9 Ha, the
+    linearization error estimates 2e-11 to 6.9e-9 Ha, none flagged."""
     h1, eri, sides, engine = n2
     E, V = engine.roots(h1, eri, 6, (3, 3), nroots=8, spin=None)
     out = [DYNAMIC_METHODS[m](engine, sides).refine(h1, eri, 6, (3, 3), E, V)
@@ -200,6 +251,8 @@ def test_linearized_follows_lowdin_on_n2(n2):
     diff = np.abs(out[1].energies - out[0].energies).max()
     print(f'N2 linearized - lowdin: {diff:.1e} Ha')
     assert diff < 1e-6
+    assert np.all(out[1].extra['linearization_error']
+                  < Numerics().downfolding.delta_linearization_warn)
 
 
 def test_zero_coupling_is_the_static_spectrum(case):
@@ -227,33 +280,78 @@ def test_vectors_are_the_sector_and_unit_norm(case, results):
             assert abs(np.vdot(c, k)) > 0.9
 
 
+#: the flags, (name, state), each method raises with the strongest pole of
+#: the ground state 0.005 Ha below it (test_near_pole_is_flagged_not_nan).
+#: Loewdin stays on the active state (Z 0.991), 0.007 Ha from the pole.
+#: Linearized, from E0 0.0098 Ha from the pole, lands on the satellite
+#: (Z 0.023, 0.013 Ha from Loewdin): near the pole at its linearization
+#: point, a satellite, its error estimate 2.2e-2 Ha; state 1 (Z 0.71) is
+#: flagged for its linearization error as without the moved pole.
+NEAR_POLE_FLAGS = {
+    'lowdin': [('delta_near_pole', 0)],
+    'linearized': [('delta_linearization', 0), ('delta_linearization', 1),
+                   ('delta_near_pole', 0), ('delta_satellite', 0)]}
+
+
+def _state(text):
+    """The state a flag message names ('... state k at ...')."""
+    return int(text.split('state ')[1].split()[0])
+
+
 @pytest.mark.parametrize('method', sorted(DYNAMIC_METHODS))
 def test_near_pole_is_flagged_not_nan(case, method):
+    """The pole (M, e) the ground state weighs most (alpha sector (1, 2))
+    moved to 0.005 Ha below the static ground state: a finite result and
+    exactly the flags of NEAR_POLE_FLAGS."""
     h1, eri, sides, engine, E, V = case
     (kind, sigma, lam, b), = sides
-    # the pole (M, e) of the ground state, alpha sector (1, 2), whose weight
-    # is closest to 1e-5: seen above the floor, and small enough that the
-    # root stays next to it (a weight of 1e-4 pushes the linearized root
-    # 0.02 Ha away, one of 1e-6 leaves the relaxed state with less than the
-    # floor on that pole)
     e_m, v_m = np.linalg.eigh(engine.sector_matrix(h1, eri, 4, (1, 2)))
     amp = np.array([v_m.T @ engine.annihilate(V[0], 4, (2, 2), u, 0).ravel()
                     for u in range(4)])                 # (orbital, M)
     weight = (amp.T @ b) ** 2                            # (M, e)
-    m, e = np.unravel_index(
-        np.argmin(np.abs(np.log(np.maximum(weight, 1e-300) / 1e-5))),
-        weight.shape)
+    m, e = np.unravel_index(np.argmax(weight), weight.shape)
     moved = lam.copy()
     moved[e] = E[0] - e_m[m] - 0.005
-    flags = []
-    with collecting(flags), pytest.warns(DeltaNearPoleWarning):
-        res = DYNAMIC_METHODS[method](engine, [(kind, sigma, moved, b)]).refine(
-            h1, eri, 4, (2, 2), E, V)
-    print(f'{method}: weight {weight[m, e]:.1e}, smallest denominator '
-          f'{res.min_denominator[0]:.4f}')
-    assert 'delta_near_pole' in [f['flag'] for f in flags]
+    res, flags, caught = _refine(method, engine, [(kind, sigma, moved, b)],
+                                 h1, eri, 4, (2, 2), E, V)
+    print(f'{method}: weight {weight[m, e]:.1e}, Z {np.round(res.z, 3)}, '
+          f'smallest denominator {np.round(res.min_denominator, 4)}, '
+          f'flags {sorted(flags)}')
+    assert sorted((name, _state(text)) for name, text in flags) == \
+        NEAR_POLE_FLAGS[method]
+    assert DeltaNearPoleWarning in caught
     assert np.all(np.isfinite(res.energies)) and np.all(np.isfinite(res.z))
-    assert res.min_denominator[0] < Numerics().downfolding.delta_pole_warn
+    for c in res.vectors:
+        assert np.all(np.isfinite(c))
+
+
+@pytest.mark.parametrize('method', sorted(DYNAMIC_METHODS))
+def test_a_root_on_a_pole_is_finite(case, method):
+    """The same pole moved exactly onto the static ground state, where the
+    first step evaluates Delta: E_K - E_M - lam = 0 in floating point, with
+    the solver's own spectrum of the sector. A finite energy, Z and vector,
+    and 'delta_near_pole', never inf or NaN."""
+    h1, eri, sides, engine, E, V = case
+    (kind, sigma, lam, b), = sides
+    _, e_m, amp, _, _ = LowdinSolver(engine, sides).sector(
+        h1, eri, 4, (2, 2), kind, 0, (1, 2), lam, b)
+    rows = np.flatnonzero(np.any(b != 0.0, axis=1))   # amp(u) exists for these
+    weight = np.array([amp(u) @ V[0].ravel() for u in rows]).T @ b[rows]
+    m, e = np.unravel_index(np.argmax(weight ** 2), weight.shape)
+    moved = lam.copy()
+    moved[e] = E[0] - e_m[m]
+    assert (E[0] - e_m[m]) - moved[e] == 0.0
+    res, flags, caught = _refine(method, engine, [(kind, sigma, moved, b)],
+                                 h1, eri, 4, (2, 2), E, V)
+    names = [name for name, _ in flags]
+    print(f'{method} on the pole: E - E_static {res.energies[0] - E[0]:.3e}, '
+          f'Z {res.z[0]:.3e}, flags {sorted(set(names))}')
+    assert 'delta_near_pole' in names
+    # no division by zero or overflow from numpy, only the solver's verdicts
+    assert all(issubclass(c, (DeltaNearPoleWarning, DeltaNotConverged,
+                              DeltaLinearizationWarning)) for c in caught)
+    assert np.all(np.isfinite(res.energies)) and np.all(np.isfinite(res.z))
+    assert np.all(np.isfinite(res.min_denominator))
     for c in res.vectors:
         assert np.all(np.isfinite(c))
 
@@ -488,7 +586,9 @@ def test_default_memory_limit(monkeypatch):
 
 def test_the_settings_are_validated():
     for bad in ({'delta_pole_warn': -1.0}, {'delta_conv': 0.0},
-                {'delta_max_iter': 0}, {'delta_weight_floor': -1e-9}):
+                {'delta_max_iter': 0}, {'delta_weight_floor': -1e-9},
+                {'delta_degenerate': -1.0},
+                {'delta_linearization_warn': 0.0}):
         with pytest.raises(ValueError):
             Numerics(downfolding=bad)
     with pytest.raises(ValueError):

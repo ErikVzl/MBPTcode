@@ -408,6 +408,15 @@ DOWNFOLDING_DELTA_WEIGHT_FLOOR = 1e-8
 # partner was 1.1e-4 away; sharing one E errs by at most (1 - 1/Z) times the
 # spread of a set, below DOWNFOLDING_DELTA_CONV.
 DOWNFOLDING_DELTA_DEGENERATE = 1e-8
+# Linearized Loewdin flags a root whose estimated linearization error,
+# Z |<c|H_eff(E)|c> - E| (the residual of the root in the exact H_eff(E),
+# turned into an energy by one Newton step), is above this, in Ha, with a
+# DeltaLinearizationWarning: 1 mEh is below chemical accuracy (1 kcal/mol,
+# 1.6 mEh), so a flagged root is wrong at the level a chemist reads, and well
+# above the error of the linearization on a weakly coupled state (Z close to
+# 1), whose error is second order in the coupling, so such states do not
+# flag.
+DOWNFOLDING_DELTA_LINEARIZATION_WARN = 1e-3
 # The memory, in GB, the dense Delta methods ('lowdin', 'linearized') may take
 # outside a Slurm job when numerics.layout.delta_dense_gb is None; inside one
 # the default is the share of the allocation (`allocation_max_memory_mb`).
