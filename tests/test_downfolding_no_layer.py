@@ -4,8 +4,9 @@ active pairs, an identity basis is the canonical route, the cut of an active
 space is checked on the occupations of a rotated block (refused below
 QP_DEGENERACY_TOL, warned below no_cut_warn) and on the orbital energies of
 an unrotated one, and a basis of other orbitals, exact integrals, the QP
-energies, QDPT's permuted mean field and an unrestricted reference are
-refused; what a later task builds is refused by its name."""
+energies and QDPT's permuted mean field are refused; what a later task
+builds is refused by its name. An unrestricted reference on a rotated basis
+is tests/test_downfolding_no_two_channels.py."""
 import warnings
 from dataclasses import replace
 
@@ -23,13 +24,12 @@ from src.EffectiveHamiltonian.Downfolding.hybridization import (
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.EffectiveHamiltonian.active_space import (ActiveSpace,
                                                    NearDegenerateCutWarning,
-                                                   ReorderedMF,
-                                                   unrestricted_from_counts)
+                                                   ReorderedMF)
 from src.EffectiveHamiltonian.orbital_basis import (OrbitalBasis,
                                                     natural_orbital_basis,
                                                     orbitals_source,
                                                     semicanonical_rotation)
-from tests.downfolding_oracle import OH, rpa_energy, unrestricted
+from tests.downfolding_oracle import rpa_energy
 from tests.no_downfolding import no_space, water
 
 
@@ -298,19 +298,3 @@ def test_settings_of_the_build(low, low_hf):
     with pytest.raises(TypeError, match='takes no options'):
         low_hf.settings(own)
 
-
-def test_unrestricted_with_a_basis_waits_for_task_7b():
-    mf = unrestricted(OH, 1)
-    eps = tuple(mf.mo_energy)
-    nocc = tuple(int(n) for n in mf.mo_occ.sum(axis=1))
-    spaces = unrestricted_from_counts(eps, nocc, 3, (2, 1))
-    bases = [OrbitalBasis(np.eye(len(e)), np.asarray(o, float), n,
-                          orbitals_source(c))
-             for e, o, n, c in zip(eps, mf.mo_occ, nocc, mf.mo_coeff)]
-    pair = tuple(replace(s, basis=b) for s, b in zip(spaces, bases))
-    for low in (run_low_level(mf, method='rpa', mode='casida'),
-                run_low_level(mf, method='hf')):
-        with pytest.raises(NotImplementedError, match='Task 7b'):
-            build_effective_hamiltonian(low, pair)
-        with pytest.raises(ValueError, match='one spin'):
-            build_effective_hamiltonian(low, (pair[0], spaces[1]))

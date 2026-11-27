@@ -156,22 +156,16 @@ def _require_basis_of(space, mo, which):
 def _require_basis_route(low, spaces):
     """Refuse what the general layer does not do with an orbital basis,
     whatever the method: a basis on one spin of an unrestricted pair only
-    (ValueError), an unrestricted reference with a basis (not yet,
-    NotImplementedError) and the exact four-index integrals of an RPA run
+    (ValueError) and the exact four-index integrals of an RPA run
     (df=False), which have no three-index factors to rotate. Nothing for
     canonical spaces."""
     with_basis = [s.basis is not None for s in spaces]
     if not any(with_basis):
         return
-    if len(spaces) == 2:
-        if not all(with_basis):
-            raise ValueError(
-                'an orbital basis on one spin only: the alpha and beta '
-                'active spaces of an unrestricted reference both take one, '
-                'or neither.')
-        raise NotImplementedError(
-            'an unrestricted reference on a rotated orbital basis: the two '
-            'spin channels are written and not yet tested (Task 7b).')
+    if len(spaces) == 2 and not all(with_basis):
+        raise ValueError(
+            'an orbital basis on one spin only: the alpha and beta active '
+            'spaces of an unrestricted reference both take one, or neither.')
     if not getattr(low, 'df', True):
         raise NotImplementedError(
             'an active space on a rotated orbital basis needs the '
@@ -192,9 +186,21 @@ def _rotated_orbitals(mo, eps, spaces):
 
 
 def _require_delta_route(spaces, delta):
-    """Refuse, with Delta on, a space whose occupied block is rotated: the
-    E_0 term of the hybridization would hold the hole side, which Delta does
-    not fold yet (NotImplementedError, Task 13)."""
+    """Refuse, with Delta on, an unrestricted reference with an orbital
+    basis: Delta for two spin channels is not built, and a rotated basis
+    without it is the static Hamiltonian only, which delta=False asks for
+    by name (NotImplementedError). Refuse, with Delta on, a space whose
+    occupied block is rotated: the E_0 term of the hybridization would hold
+    the hole side, which Delta does not fold yet (NotImplementedError,
+    Task 13)."""
+    if delta and len(spaces) == 2 and any(s.basis is not None
+                                          for s in spaces):
+        raise NotImplementedError(
+            'an unrestricted (UHF/UKS) reference on a rotated orbital basis '
+            'with Delta on: the unrestricted Delta, the folding of the Fock '
+            'coupling of two spin channels, is not built. delta=False gives '
+            'the static Hamiltonian only (E_0, the one-body and the '
+            'two-body part), without the coupling the rotation creates.')
     if delta and any(s.basis is not None and s.basis.rotates_occupied
                      for s in spaces):
         raise NotImplementedError(
@@ -348,9 +354,11 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     QP_DEGENERACY_TOL, NearDegenerateCutWarning and the flag
     'no_cut_near_degenerate' below no_cut_warn). Refused: a basis built on
     other orbitals than the mean field's or that does not fit its space
-    (ValueError), the exact integrals of an RPA run (df=False,
-    NotImplementedError), and, not yet, an unrestricted reference with a
-    basis (NotImplementedError).
+    (ValueError), a basis on one spin of an unrestricted pair only
+    (ValueError), and the exact integrals of an RPA run (df=False,
+    NotImplementedError). An unrestricted reference takes a basis on both
+    spins, each built on that spin's orbitals, with delta=False only (see
+    `delta`).
 
     delta: True | False. On a rotated orbital basis the rotation couples
     active and environment orbitals; with delta=True, the default, that
@@ -361,9 +369,13 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     on a reference that is not HF}. delta=False leaves it out: the result
     is the static Hamiltonian only, with DeltaOffWarning and the flag
     'delta_off'. Until Task 13 a space whose occupied block is rotated is
-    refused with Delta on (NotImplementedError). For canonical orbitals the
-    coupling is identically zero: nothing is built, hybridization is None
-    and there is no 'fock_coupling' entry, whatever `delta` is. _blocks
+    refused with Delta on (NotImplementedError). An unrestricted reference
+    with a basis is refused with Delta on, the default
+    (NotImplementedError): Delta for two spin channels is not built, so
+    the static Hamiltonian it gives with delta=False has to be asked for by
+    name. For canonical orbitals the coupling is identically zero: nothing
+    is built, hybridization is None and there is no 'fock_coupling' entry,
+    whatever `delta` is. _blocks
     (tests only) replaces DEFAULT_BLOCKS, the blocks the coupling folds.
     Exactly when the coupling is built the method's `downfold` gets
     hybridization=True and E_0 gains its one Delta term,
@@ -420,8 +432,8 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         diagnostics = dict(terms.diagnostics)
         coupling = None
         if rotated and delta:
-            # one channel: an unrestricted reference with a basis is refused
-            # above (_require_basis_route)
+            # one channel: an unrestricted reference with a basis and Delta
+            # on is refused above (_require_delta_route)
             coupling = fock_coupling(
                 mf, mo[0], rotations[0], eps[0], spaces[0],
                 blocks=DEFAULT_BLOCKS if _blocks is None else _blocks)

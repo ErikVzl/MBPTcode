@@ -9,6 +9,8 @@ folds:
 
     F_s  = T^T diag(eps) T               the reference's own operator
     F    = C^T (h0 + J[D] - K[D]/2) C     the bare Fock operator, exact J, K
+           (spin s of an unrestricted reference: C^s^T (h0 + J[D_a + D_b]
+           - K[D_s]) C^s, spec 6c; the coupling conserves spin, one per spin)
     lam_E, U_E = eigh F(E_v, E_v);  lam_I, U_I = eigh F(I, I)
     B_p  = F_s(A_v, E_v) U_E               an electron leaves the active space
     B_h  = F_s(A_o, I) U_I                 an electron enters it
@@ -75,26 +77,40 @@ class Coupling:
 
 
 def fock_coupling(mf, mo_rotated, T, eps, active_space,
-                  blocks=COUPLING_BLOCKS):
-    """The `Coupling` of one spin channel of a restricted reference `mf`.
+                  blocks=COUPLING_BLOCKS, spin=None):
+    """The `Coupling` of one spin channel of the reference `mf`.
 
     mo_rotated = mo_coeff @ T are the orbitals of the active space, T its
     semicanonical rotation (`semicanonical_rotation`) and eps the canonical
-    orbital energies of the reference. The bare Fock operator is built from
-    D = mf.make_rdm1() with the exact four-centre J and K of `mf.mol`.
-    `blocks` is a subset of COUPLING_BLOCKS; the other block is zeroed, its
-    norm reported."""
-    if isinstance(mf, scf.uhf.UHF):
-        raise NotImplementedError(
-            'the Fock coupling of an unrestricted reference: the two spin '
-            'channels are not yet built (Task 7b).')
+    orbital energies of the reference, all of that channel. The bare Fock
+    operator is built with the exact four-centre J and K of `mf.mol`: from
+    D = mf.make_rdm1() for a restricted reference (spin=None), and for spin
+    s (0 alpha, 1 beta) of an unrestricted one from (D_a, D_b) =
+    mf.make_rdm1() as h0 + J[D_a + D_b] - K[D_s] (spec 6c). An unrestricted
+    reference without `spin`, or a restricted one with it, is refused
+    (ValueError). `blocks` is a subset of COUPLING_BLOCKS; the other block
+    is zeroed, its norm reported."""
+    unrestricted = isinstance(mf, scf.uhf.UHF)
+    if unrestricted and spin not in (0, 1):
+        raise ValueError(
+            f'spin={spin!r}: the Fock coupling of an unrestricted reference '
+            f'is one per spin channel, spin=0 (alpha) or 1 (beta).')
+    if not unrestricted and spin is not None:
+        raise ValueError(
+            f'spin={spin!r}: a restricted reference is one spin channel; '
+            f'leave spin=None.')
     unknown = [b for b in blocks if b not in COUPLING_BLOCKS]
     if unknown:
         raise ValueError(f'unknown coupling blocks {unknown}; the blocks are '
                          f'{COUPLING_BLOCKS}.')
     space = active_space
-    j, k = get_jk(mf.mol, mf.make_rdm1())
-    F = mo_rotated.T @ (mf.get_hcore() + j - 0.5 * k) @ mo_rotated
+    if unrestricted:
+        j, k = get_jk(mf.mol, np.asarray(mf.make_rdm1()))
+        fock = mf.get_hcore() + j[0] + j[1] - k[spin]
+    else:
+        j, k = get_jk(mf.mol, mf.make_rdm1())
+        fock = mf.get_hcore() + j - 0.5 * k
+    F = mo_rotated.T @ fock @ mo_rotated
     F_s = T.T @ (np.asarray(eps)[:, None] * T)
     X = F - F_s
     act, n_occ = space.act, space.n_act_occ

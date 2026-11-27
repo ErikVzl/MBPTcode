@@ -1,16 +1,21 @@
 """Mean fields and settings shared by the tests of the natural-orbital
-downfolding (tests/test_downfolding_no_*.py), the brute-force checks of
-their residual screening (`brute_force_vt`) and residual polarizability
-(`brute_force_pr`), and the dense oracle of the RPA correlation energy of a
-hybridized active space (`dense_drpa_ec`)."""
+downfolding (tests/test_downfolding_no_*.py), a random rotated basis that
+stands in for natural orbitals where there are none (`random_basis`, e.g.
+an unrestricted reference), the brute-force checks of their residual
+screening (`brute_force_vt`) and residual polarizability (`brute_force_pr`),
+and the dense oracle of the RPA correlation energy of a hybridized active
+space (`dense_drpa_ec`)."""
 import numpy as np
 import scipy.linalg
 from pyscf import dft, scf
-from scipy.linalg import cho_factor, cho_solve
+from scipy.linalg import block_diag, cho_factor, cho_solve
 
+from src.Base.numerics.constants import DOWNFOLDING_NO_CUT_WARN
 from src.Base.numerics.numerics import Numerics
 from src.EffectiveHamiltonian.active_space import ActiveSpace
-from src.EffectiveHamiltonian.orbital_basis import natural_orbital_basis
+from src.EffectiveHamiltonian.orbital_basis import (OrbitalBasis,
+                                                    natural_orbital_basis,
+                                                    orbitals_source)
 from tests.downfolding_oracle import water as _water_hf
 from tests.gw_density_routes import mean_field as _nh3_mean_field
 
@@ -52,22 +57,73 @@ def no_space(low, n_occ, n_virt, rotate_occupied=False):
                                     range(nocc, nocc + n_virt), basis=basis)
 
 
+def random_basis(low, seed=0, rotate_occupied=True):
+    """An `OrbitalBasis` of the mean field of `low` that is a fixed random
+    rotation inside the occupied and inside the virtual orbitals (the
+    occupied block the identity unless rotate_occupied), for a test that
+    needs a rotated basis and has no natural orbitals; the pair (alpha,
+    beta), each on that spin's orbitals and with its own rotation, for an
+    unrestricted reference. The occupations are a strictly descending ramp
+    in each block, g - k s in the occupied and (nvirt - k) s in the virtual
+    block (g = 2 restricted, 1 per spin), with the step s = 2.5
+    DOWNFOLDING_NO_CUT_WARN, so no cut through either block comes near the
+    warning of the cut check."""
+    mf, rng = low.mf, np.random.default_rng(seed)
+    if isinstance(mf, scf.uhf.UHF):
+        return tuple(_random_basis_of(rng, c, occ, 1.0, rotate_occupied)
+                     for c, occ in zip(mf.mo_coeff, mf.mo_occ))
+    return _random_basis_of(rng, mf.mo_coeff, mf.mo_occ, 2.0, rotate_occupied)
+
+
+def _random_basis_of(rng, mo_coeff, mo_occ, g, rotate_occupied):
+    """`random_basis` of one spin channel."""
+    norb, nocc = len(mo_occ), int(np.count_nonzero(mo_occ))
+    step = 2.5 * DOWNFOLDING_NO_CUT_WARN
+    rotation = np.eye(norb)
+    if rotate_occupied:
+        rotation[:nocc, :nocc] = np.linalg.qr(rng.normal(size=(nocc, nocc)))[0]
+    rotation[nocc:, nocc:] = np.linalg.qr(
+        rng.normal(size=(norb - nocc, norb - nocc)))[0]
+    occupations = np.concatenate([g - step * np.arange(1, nocc + 1),
+                                  step * np.arange(norb - nocc, 0, -1)])
+    return OrbitalBasis(rotation, occupations, nocc,
+                        orbitals_source(mo_coeff))
+
+
 def brute_force_vt(b, eps, nocc, T, space):
     """vt = W^r(0) - v by its definition: the active ph pairs deleted from A + B in the
-    rotated pair basis (non-diagonal one-body part), one Cholesky. b (naux, nmo, nmo) canonical."""
-    nvirt = len(eps) - nocc
-    b_ov = b[:, :nocc, nocc:].reshape(len(b), -1)
-    delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()
-    R = np.einsum('ij,ab->iajb', T[:nocc, :nocc], T[nocc:, nocc:]).reshape(nocc * nvirt, -1)
-    apb = R.T @ (np.diag(delta) + 4.0 * b_ov.T @ b_ov) @ R
-    active = np.zeros((nocc, nvirt), bool)
-    active[np.ix_(space.occ_active, space.virt_active - nocc)] = True
-    r = ~active.ravel()
-    b_rot = np.einsum('Qpq,pi,qj->Qij', b, T, T)
-    b_act = b_rot[:, space.act][:, :, space.act].reshape(len(b), -1)
-    v_r = b_rot[:, :nocc, nocc:].reshape(len(b), -1)[:, r].T @ b_act
-    vt = -4.0 * v_r.T @ cho_solve(cho_factor(apb[np.ix_(r, r)]), v_r)
-    return vt.reshape((len(space.act),) * 4)
+    rotated pair basis (non-diagonal one-body part), one Cholesky. b (naux, nmo, nmo) canonical.
+
+    One spin channel (restricted, g = 2): b, eps, nocc, T and space of it,
+    A + B = R^T (delta + 4K) R, and vt (n_act,)*4. Two (unrestricted, g = 1
+    each): every argument the pair (alpha, beta), the pairs of both spins
+    stacked, A + B = R^T (delta + 2K) R with K = B_ov^T B_ov coupling them
+    and R block diagonal in the spins, and the blocks (aa, ab, bb),
+    vt^{st} = -2 V_s^T [(A+B)_rr]^-1 V_t."""
+    one = not isinstance(space, (tuple, list))
+    chans = list(zip(*[(x,) if one else x for x in (b, eps, nocc, T, space)]))
+    g = 2.0 if one else 1.0
+    b_ov, delta, rots, res, b_res, b_act = [], [], [], [], [], []
+    for b_s, eps_s, n_s, T_s, sp in chans:
+        nvirt = len(eps_s) - n_s
+        b_ov.append(b_s[:, :n_s, n_s:].reshape(len(b_s), -1))
+        delta.append((eps_s[n_s:][None, :] - eps_s[:n_s][:, None]).ravel())
+        rots.append(np.einsum('ij,ab->iajb', T_s[:n_s, :n_s],
+                              T_s[n_s:, n_s:]).reshape(n_s * nvirt, -1))
+        active = np.zeros((n_s, nvirt), bool)
+        active[np.ix_(sp.occ_active, sp.virt_active - n_s)] = True
+        res.append(~active.ravel())
+        b_rot = np.einsum('Qpq,pi,qj->Qij', b_s, T_s, T_s)
+        b_act.append(b_rot[:, sp.act][:, :, sp.act].reshape(len(b_s), -1))
+        b_res.append(b_rot[:, :n_s, n_s:].reshape(len(b_s), -1)[:, res[-1]])
+    b_ov, R, r = np.hstack(b_ov), block_diag(*rots), np.concatenate(res)
+    apb = R.T @ (np.diag(np.concatenate(delta)) + 2.0 * g * b_ov.T @ b_ov) @ R
+    v_r = [np.hstack(b_res).T @ b for b in b_act]
+    factor = cho_factor(apb[np.ix_(r, r)])
+    n = len(chans[0][4].act)
+    blocks = [(-2.0 * g * v_r[s].T @ cho_solve(factor, v_r[t])).reshape(
+        (n,) * 4) for s, t in (((0, 0),) if one else ((0, 0), (0, 1), (1, 1)))]
+    return blocks[0] if one else tuple(blocks)
 
 
 def brute_force_pr(b_ov, eps, nocc, T, space, g=2):
