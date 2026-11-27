@@ -430,6 +430,27 @@ DOWNFOLDING_DELTA_LINEARIZATION_WARN = 1e-3
 # state of an NO CAS(4,4) whose second active virtual is the last virtual NO)
 # and far above the rounding of an exactly empty direction.
 DOWNFOLDING_DELTA_OCCUPATION_FLOOR = 1e-6
+# The removal and attachment Green's functions of a CI state by block Lanczos
+# (`dynamic_backends.block_lanczos`) build at most this many blocks of the
+# Krylov space of the start vectors s_t (a_t|K> or a+_t|K>). d blocks with no
+# column dropped reproduce the moments s_t^T H^n s_u for n = 0 .. 2d - 1, so
+# 3 blocks give six moments.
+# 3 is the upper end of the depths 2 to 3 of the prototype of the scalable
+# method 'sa_remainder', which runs one short block Lanczos per root.
+DOWNFOLDING_DELTA_LANCZOS_DEPTH = 3
+# Block Lanczos takes a start vector whose norm is below this as zero, and
+# drops a column of the QR factorization (with column pivoting) of a block
+# whose diagonal entry |R_jj| is below this. An absolute bound: on the start
+# block |R_jj| is the norm of the part of a start vector outside the span of
+# the columns kept before it, on a later block that of a column of
+# H Q_j outside the span of the earlier blocks, in Ha. The squared norm of
+# a_{u sigma}|K> is the occupation of the spin orbital u sigma in K (that of
+# a+_{u sigma}|K> its hole), so for K of unit norm a norm of 1e-8 is an
+# occupation of 1e-16. That lies far above the norm of the start vector of
+# an exactly emptied orbital (2.5e-32, tests/test_downfolding_no_lanczos.py)
+# and far below the smallest spin-orbital occupation or hole of the
+# water/6-31G NO CAS(4,4) ground state, 2.7e-4.
+DOWNFOLDING_DELTA_RANK_TOL = 1e-8
 # The memory, in GB, the dense Delta methods ('lowdin', 'linearized') may take
 # outside a Slurm job when numerics.layout.delta_dense_gb is None; inside one
 # the default is the share of the allocation (`allocation_max_memory_mb`).

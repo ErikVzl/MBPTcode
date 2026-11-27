@@ -135,7 +135,9 @@ src/EffectiveHamiltonian/
                                coupled cluster), dynamic_backends.py (the
                                dynamic backends, which refine the states of
                                a static one with Delta: exact and
-                               linearized Loewdin on the FCI engine),
+                               linearized Loewdin on the FCI engine, and
+                               the removal and attachment Green's
+                               functions of a CI state by block Lanczos),
                                determinants.py
     Downfolding/               static effective Hamiltonians of an active
                                space downfolded from HF or RPA (see

@@ -54,10 +54,12 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DOWNFOLDING_CONTINUATION_MARGIN,
                                          DOWNFOLDING_DELTA_CONV,
                                          DOWNFOLDING_DELTA_DEGENERATE,
+                                         DOWNFOLDING_DELTA_LANCZOS_DEPTH,
                                          DOWNFOLDING_DELTA_LINEARIZATION_WARN,
                                          DOWNFOLDING_DELTA_MAX_ITER,
                                          DOWNFOLDING_DELTA_OCCUPATION_FLOOR,
                                          DOWNFOLDING_DELTA_POLE_WARN,
+                                         DOWNFOLDING_DELTA_RANK_TOL,
                                          DOWNFOLDING_DELTA_WEIGHT_FLOOR,
                                          DOWNFOLDING_NO_CUT_WARN,
                                          DOWNFOLDING_POLE_MARGIN, DOWNFOLDING_SRG_S,
@@ -589,13 +591,25 @@ class DownfoldingNumerics:
     electron to such a direction, so it has no attachment energy. D_SA is
     zero along a dropped direction.
 
+    The removal and attachment Green's functions of a CI state by block
+    Lanczos (`solvers.dynamic_backends.block_lanczos`): delta_lanczos_depth,
+    the largest number of blocks of the Krylov space of the start vectors
+    (default DOWNFOLDING_DELTA_LANCZOS_DEPTH, 3); d blocks with no column
+    dropped reproduce the moments s_t^T H^n s_u of the start vectors s_t
+    (a_t|K> or a+_t|K>) for n = 0 .. 2d - 1, and fewer blocks are built
+    when a new block has no column left (the Krylov space is exhausted).
+    delta_rank_tol: a start vector
+    whose norm is below this is taken as zero (zero weights in every pole),
+    and a column of the QR factorization of a block whose |R_jj| is below
+    this is dropped (default DOWNFOLDING_DELTA_RANK_TOL, 1e-8; absolute).
+
     Refused when built: srg_s that is not a finite positive number or None,
     a negative pole_margin, continuation_margin, no_cut_warn,
     delta_pole_warn, delta_weight_floor or delta_degenerate, a delta_conv
     or delta_linearization_warn that is not positive, a delta_conv that is not
-    below delta_pole_warn, a delta_max_iter
-    that is not a positive integer, and a delta_occupation_floor that is not
-    a finite positive occupation."""
+    below delta_pole_warn, a delta_max_iter or delta_lanczos_depth
+    that is not a positive integer, and a delta_occupation_floor or
+    delta_rank_tol that is not finite and positive."""
     srg_s: Optional[float] = DOWNFOLDING_SRG_S
     pole_margin: float = DOWNFOLDING_POLE_MARGIN
     continuation_margin: float = DOWNFOLDING_CONTINUATION_MARGIN
@@ -607,6 +621,8 @@ class DownfoldingNumerics:
     delta_degenerate: float = DOWNFOLDING_DELTA_DEGENERATE
     delta_linearization_warn: float = DOWNFOLDING_DELTA_LINEARIZATION_WARN
     delta_occupation_floor: float = DOWNFOLDING_DELTA_OCCUPATION_FLOOR
+    delta_lanczos_depth: int = DOWNFOLDING_DELTA_LANCZOS_DEPTH
+    delta_rank_tol: float = DOWNFOLDING_DELTA_RANK_TOL
 
     def __post_init__(self):
         if self.srg_s is not None and not (math.isfinite(self.srg_s)
@@ -656,6 +672,16 @@ class DownfoldingNumerics:
             raise ValueError(f'delta_occupation_floor='
                              f'{self.delta_occupation_floor!r}: a finite '
                              'positive occupation')
+        if (isinstance(self.delta_lanczos_depth, bool)
+                or not isinstance(self.delta_lanczos_depth, Integral)
+                or self.delta_lanczos_depth < 1):
+            raise ValueError(f'delta_lanczos_depth='
+                             f'{self.delta_lanczos_depth!r}: a positive '
+                             'number of Lanczos blocks')
+        if not (math.isfinite(self.delta_rank_tol)
+                and self.delta_rank_tol > 0):
+            raise ValueError(f'delta_rank_tol={self.delta_rank_tol!r}: a '
+                             'finite positive norm')
 
 
 @dataclass(frozen=True)

@@ -71,6 +71,17 @@ so the eigenvalues of H_eff(E_k) below E_k are the solutions below E_k
 Haynsworth's inertia additivity on the explicit P + Q matrix). The
 dynamic backends do not sort: `solvers.solve.solve` sorts the refined roots
 and raises DeltaRootsCrossedWarning from these counts.
+
+The removal and attachment Green's functions of one CI state K need no
+sector spectrum: `removal_spectrum` and `attachment_spectrum` run block
+Lanczos (`block_lanczos`, which sees a product and its start vectors alone)
+on the engine's product of the sector with one electron of spin sigma less
+or more, started from a_{u sigma}|K> or a+_{u sigma}|K>, and return poles
+and weights with G_tu(z) = sum_m weights[t, m] weights[u, m] / (z - poles[m]).
+Its depth is numerics.downfolding.delta_lanczos_depth blocks; a start
+vector with a norm below numerics.downfolding.delta_rank_tol is taken as
+zero, and a start or Krylov direction whose part outside the directions
+kept before it has a norm below delta_rank_tol is dropped.
 """
 import math
 from dataclasses import dataclass, field
@@ -545,6 +556,18 @@ def _linearized(h_n, sectors, energies, starts, settings, keep):
 
 
 # ------------------------------------------------------------ the backends
+def _require_sector_operations(engine):
+    """Refuse (ValueError) an engine without `has_sector_operations`, naming
+    the engine to use and the static forms of Delta, which need none."""
+    if not getattr(engine, 'has_sector_operations', False):
+        raise ValueError(
+            f'{type(engine).__name__} has no sector operations (the '
+            f'sectors with one electron less or more), which a dynamic '
+            f'Delta method takes from its engine: use PyscfFCISolver as '
+            f"the engine, or a static form of Delta, 'static_sa' or "
+            f"'static_mf', which changes h and runs with any backend")
+
+
 class EnergyDependentSolver:
     """A dynamic backend: refines the states of a static solve with Delta.
 
@@ -559,13 +582,7 @@ class EnergyDependentSolver:
     method = None
 
     def __init__(self, engine, sides, numerics=None, d_sa=None):
-        if not getattr(engine, 'has_sector_operations', False):
-            raise ValueError(
-                f'{type(engine).__name__} has no sector operations (the '
-                f'sectors with one electron less or more), which a dynamic '
-                f'Delta method takes from its engine: use PyscfFCISolver as '
-                f"the engine, or a static form of Delta, 'static_sa' or "
-                f"'static_mf', which changes h and runs with any backend")
+        _require_sector_operations(engine)
         self.engine = engine
         self.sides = [(kind, sigma, np.asarray(lam, dtype=float),
                        np.asarray(b, dtype=float))
@@ -734,3 +751,185 @@ class LinearizedLowdinSolver(EnergyDependentSolver):
 
 #: the dynamic backends by the name of their method
 DYNAMIC_METHODS = {'lowdin': LowdinSolver, 'linearized': LinearizedLowdinSolver}
+
+
+# ------------------------------- the Green's functions of a state by Lanczos
+def block_lanczos(matvec, start, numerics):
+    """(poles (m,), weights (n_start, m)): the Green's function of a real
+    symmetric H between the start vectors s_t by block Lanczos,
+
+        G_tu(z) = sum_m weights[t, m] weights[u, m] / (z - poles[m]),
+
+    which approximates s_t^T (z - H)^-1 s_u and equals it, up to the
+    dropped columns below, once the Krylov space of the start vectors is
+    exhausted. It sees the product and the start vectors alone.
+
+    matvec: v -> H v on one vector of shape (dim,), returning shape (dim,);
+    start: (dim, n_start), the start vectors as columns; numerics: a
+    `Numerics` (None: the defaults), whose downfolding.delta_lanczos_depth
+    is the largest number of blocks and downfolding.delta_rank_tol the
+    threshold below.
+
+    A start vector whose norm is below delta_rank_tol is set to zero. The
+    start block S is factorized by QR with column pivoting, and the columns
+    from the first j with |R_jj| below delta_rank_tol on are dropped (with
+    pivoting |R_jj| does not increase): S = Q_0 B, Q_0 the r_0
+    kept orthonormal columns and B (r_0, n_start) the kept rows of R, taken
+    back to the order of the start vectors. With pivoting, a dropped start
+    vector is one whose part outside the span of the kept ones has a norm
+    below delta_rank_tol; B replaces it by its projection on that span. The
+    block j + 1 is the same QR of H Q_j after every earlier block has been
+    projected out of it twice (full reorthogonalization), with the same
+    columns dropped: a dropped column is a direction of the Krylov space
+    whose part outside the blocks built so far has a norm below
+    delta_rank_tol, and G misses what H reaches only through it. Its kept
+    rows of R are the coupling block C_{j+1} = Q_{j+1}^T H Q_j. Blocks are
+    added until there are delta_lanczos_depth of them, or until a new block
+    has no column left (the Krylov space is exhausted). poles are the
+    eigenvalues of the block-tridiagonal T, diagonal blocks Q_j^T H Q_j
+    (symmetrized) and off-diagonal blocks C_j, so m is the number of kept
+    columns of all blocks. weights = B^T Y_0, Y_0 the rows of the
+    eigenvectors of T on the start block: weights[t, m] is the projection
+    of s_t on the m-th Ritz vector, rotated back through B.
+
+    With no column dropped, d blocks reproduce the moments
+    sum_m weights[t, m] weights[u, m] poles[m]^n = s_t^T H^n s_u for
+    n = 0 .. 2d - 1. weights has one row per start vector, in the order
+    given, those set to zero or dropped included; a start vector set to
+    zero has zero weights in every pole. A start block with no column left
+    (every start vector zero, or no start vector) gives poles (0,) and
+    weights (n_start, 0)."""
+    settings = numerics_or_default(numerics).downfolding
+    start = np.array(start, dtype=float)
+    if start.ndim != 2:
+        raise ValueError(f'start of shape {start.shape}: (dim, n_start), '
+                         f'the start vectors as columns')
+    start[:, np.linalg.norm(start, axis=0) < settings.delta_rank_tol] = 0.0
+    q, coef = _kept_columns(start, settings)
+    if q.shape[1] == 0:
+        return np.zeros(0), np.zeros((start.shape[1], 0))
+    blocks, diagonal, coupling = [q], [], []
+    while True:
+        hq = np.column_stack([np.asarray(matvec(c), dtype=float).ravel()
+                              for c in q.T])
+        a = q.T @ hq
+        diagonal.append(0.5 * (a + a.T))
+        if len(blocks) == settings.delta_lanczos_depth:
+            break
+        basis = np.hstack(blocks)
+        for _ in range(2):
+            hq -= basis @ (basis.T @ hq)
+        q, c = _kept_columns(hq, settings)
+        if q.shape[1] == 0:
+            break
+        blocks.append(q)
+        coupling.append(c)
+    sizes = [d.shape[0] for d in diagonal]
+    edges = np.concatenate([[0], np.cumsum(sizes)]).astype(int)
+    t = np.zeros((edges[-1], edges[-1]))
+    for j, d in enumerate(diagonal):
+        t[edges[j]:edges[j + 1], edges[j]:edges[j + 1]] = d
+    for j, c in enumerate(coupling):
+        t[edges[j + 1]:edges[j + 2], edges[j]:edges[j + 1]] = c
+        t[edges[j]:edges[j + 1], edges[j + 1]:edges[j + 2]] = c.T
+    poles, vecs = np.linalg.eigh(t)
+    return poles, coef.T @ vecs[:edges[1]]
+
+
+def _kept_columns(block, settings):
+    """(Q, C) of one block of Lanczos: the QR factorization with column
+    pivoting of `block` (dim, k), the columns from the first with
+    |R_jj| < settings.delta_rank_tol on dropped (settings: the downfolding
+    section of a `Numerics`), so that block = Q C up to the dropped part;
+    Q (dim, r) orthonormal, C (r, k) the kept rows of R in the order of the
+    columns of `block`. r = 0 for a block with no rows, no columns, or no
+    column above the threshold."""
+    dim, k = block.shape
+    if dim == 0 or k == 0:
+        return np.zeros((dim, 0)), np.zeros((0, k))
+    q, r, perm = scipy.linalg.qr(block, mode='economic', pivoting=True)
+    small = np.abs(np.diag(r)) < settings.delta_rank_tol
+    rank = int(np.argmax(small)) if np.any(small) else len(small)
+    c = np.empty((rank, k))
+    c[:, perm] = r[:rank]
+    return q[:, :rank], c
+
+
+def removal_spectrum(engine, vector, h1, eri, norb, nelec, orbitals, sigma,
+                     numerics):
+    """(poles (m,), weights (len(orbitals), m)): the removal Green's
+    function of the CI state `vector`,
+
+        G_tu(z) = <K|a+_{t sigma} (z - H^(N-1))^-1 a_{u sigma}|K>
+                ~ sum_m weights[t, m] weights[u, m] / (z - poles[m]),
+
+    by `block_lanczos` with H^(N-1) the engine's `sector_product` of the
+    sector with one electron of spin sigma less, started from the vectors
+    a_{u sigma}|K> of the engine's `annihilate`, one per entry u of
+    `orbitals`, in that order. Exact, up to the dropped columns of
+    `block_lanczos`, once the Krylov space is exhausted; the depth is
+    numerics.downfolding.delta_lanczos_depth (blocks), and with no column
+    dropped d blocks reproduce the moments <K|a+_t H^n a_u|K>,
+    n = 0 .. 2d - 1. An orbital whose a_{u sigma}|K> has a norm below
+    numerics.downfolding.delta_rank_tol (for K of unit norm, an occupation
+    of u sigma in K below delta_rank_tol^2) has zero weights in every
+    pole.
+
+    engine: a static backend with `has_sector_operations` (one without is
+    refused, ValueError, as by `EnergyDependentSolver`); vector: a CI array
+    of the sector nelec = (n_alpha, n_beta) of the integrals (h1, eri) in
+    norb orbitals, used as given (G scales with its norm squared; the
+    engine's roots have norm 1); sigma: the spin of the removed electron,
+    0 (alpha) or 1 (beta); numerics: a `Numerics` (None: the defaults).
+    poles carry no constant, as the engine's energies. No electron of spin
+    sigma to remove: no sector, poles (0,) and weights
+    (len(orbitals), 0). The kernel works on flattened CI vectors; the
+    engine's product sees CI arrays of the sector's shape."""
+    return _one_electron_spectrum(engine, -1, vector, h1, eri, norb, nelec,
+                                  orbitals, sigma, numerics)
+
+
+def attachment_spectrum(engine, vector, h1, eri, norb, nelec, orbitals,
+                        sigma, numerics):
+    """(poles (m,), weights (len(orbitals), m)): the attachment Green's
+    function of the CI state `vector`,
+
+        G_tu(z) = <K|a_{t sigma} (z - H^(N+1))^-1 a+_{u sigma}|K>
+                ~ sum_m weights[t, m] weights[u, m] / (z - poles[m]),
+
+    the mirror of `removal_spectrum` (the same arguments, depth, threshold
+    and conventions): H^(N+1) the engine's `sector_product` of the sector
+    with one electron of spin sigma more, started from the vectors
+    a+_{u sigma}|K> of the engine's `create`. An orbital whose
+    a+_{u sigma}|K> has a norm below numerics.downfolding.delta_rank_tol
+    (for K of unit norm, a hole of u sigma in K below delta_rank_tol^2) has
+    zero weights in every pole. The spin
+    sigma full (n_sigma = norb): no sector, poles (0,) and weights
+    (len(orbitals), 0)."""
+    return _one_electron_spectrum(engine, +1, vector, h1, eri, norb, nelec,
+                                  orbitals, sigma, numerics)
+
+
+def _one_electron_spectrum(engine, step, vector, h1, eri, norb, nelec,
+                           orbitals, sigma, numerics):
+    """`removal_spectrum` (step -1) or `attachment_spectrum` (step +1)."""
+    _require_sector_operations(engine)
+    if sigma not in (0, 1):
+        raise ValueError(f'sigma={sigma!r}: 0 (alpha) or 1 (beta)')
+    nelec = (int(nelec[0]), int(nelec[1]))
+    orbitals = [int(u) for u in orbitals]
+    target = list(nelec)
+    target[sigma] += step
+    target = tuple(target)
+    shape = sector_shape(norb, target)
+    if 0 in shape:
+        return np.zeros(0), np.zeros((len(orbitals), 0))
+    op = engine.annihilate if step < 0 else engine.create
+    start = np.zeros((math.prod(shape), len(orbitals)))
+    for i, u in enumerate(orbitals):
+        start[:, i] = np.asarray(op(vector, norb, nelec, u, sigma)).ravel()
+    product = engine.sector_product(h1, eri, norb, target)
+
+    def matvec(v):
+        return np.asarray(product(v.reshape(shape))).ravel()
+    return block_lanczos(matvec, start, numerics)

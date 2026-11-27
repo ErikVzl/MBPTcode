@@ -7,7 +7,9 @@ ActiveSpaceSolver interface), hands on the states of a static solve
 dynamic backend; dynamic_backends.py holds the dynamic backends, which refine the
 states of a static backend with the energy-dependent term Delta of a
 downfolding on a rotated basis (exact and linearized Loewdin,
-`DYNAMIC_METHODS`, on the FCI engine's sector operations) and import
+`DYNAMIC_METHODS`, on the FCI engine's sector operations), and the
+removal and attachment Green's functions of a CI state by block Lanczos
+(`block_lanczos`, `removal_spectrum`, `attachment_spectrum`), and import
 backends.py, never the reverse; determinants.py builds the explicit determinant-basis matrix and the
 spin-orbital form of a spatial g_eff. Each entry point is imported from the
 module that defines it; this package re-exports nothing.
