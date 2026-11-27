@@ -129,7 +129,8 @@ src/EffectiveHamiltonian/
                                diagram evaluators and the effective
                                Hamiltonian built from them
     solvers/                   the many-body solvers of g_eff: solve.py
-                               (the dispatcher), backends.py (the static
+                               (the dispatcher; with the coupling it refines
+                               the static states with Delta), backends.py (the static
                                backends: FCI, the determinant basis, DMRG,
                                coupled cluster), dynamic_backends.py (the
                                dynamic backends, which refine the states of

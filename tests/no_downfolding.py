@@ -201,10 +201,11 @@ def _operator_matrix(op, norb, nelec, u):
     return np.array(cols).T
 
 
-def pq_spectrum(h1, eri, norb, nelec, sides):
+def pq_spectrum(h1, eri, norb, nelec, sides, with_vectors=False):
     """(energies, p_weights): the eigenvalues of the explicit P + Q matrix
     of an active space coupled to environment levels, and the weight of each
-    eigenvector in P.
+    eigenvector in P; with_vectors, also the P part of each eigenvector,
+    (dim P, n) in pyscf's determinant order, unnormalized.
 
     P is the FCI sector nelec of (h1, eri). `sides` are those of
     `Coupling.sides()`, (kind, sigma, lam, b), sigma None for both spins.
@@ -234,4 +235,7 @@ def pq_spectrum(h1, eri, norb, nelec, sides):
     c = np.vstack(couplings)
     full = np.block([[h_n, c.T], [c, block_diag(*blocks)]])
     energies, vectors = np.linalg.eigh(full)
-    return energies, (vectors[:len(h_n)] ** 2).sum(0)
+    p_parts = vectors[:len(h_n)]
+    if with_vectors:
+        return energies, (p_parts ** 2).sum(0), p_parts
+    return energies, (p_parts ** 2).sum(0)

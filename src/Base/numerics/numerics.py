@@ -56,6 +56,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DOWNFOLDING_DELTA_DEGENERATE,
                                          DOWNFOLDING_DELTA_LINEARIZATION_WARN,
                                          DOWNFOLDING_DELTA_MAX_ITER,
+                                         DOWNFOLDING_DELTA_OCCUPATION_FLOOR,
                                          DOWNFOLDING_DELTA_POLE_WARN,
                                          DOWNFOLDING_DELTA_WEIGHT_FLOOR,
                                          DOWNFOLDING_NO_CUT_WARN,
@@ -577,14 +578,20 @@ class DownfoldingNumerics:
     linearization makes on a weakly coupled state, Z close to 1, which is
     second order in the coupling). delta_conv is also the smallest denominator Delta resolves: a
     root closer to a pole is evaluated at that distance, finite. Their
-    memory limit is layout.delta_dense_gb.
+    memory limit is layout.delta_dense_gb. delta_occupation_floor: the
+    static form 'static_sa' (`Downfolding.hybridization.state_averaged_delta`)
+    drops a direction of the state-averaged occupation gamma of the active
+    virtual orbitals whose occupation is below this (default
+    DOWNFOLDING_DELTA_OCCUPATION_FLOOR): no state of the average removes an
+    electron from it, so it has no removal energy and D_SA is zero along it.
 
     Refused when built: srg_s that is not a finite positive number or None,
     a negative pole_margin, continuation_margin, no_cut_warn,
     delta_pole_warn, delta_weight_floor or delta_degenerate, a delta_conv
     or delta_linearization_warn that is not positive, a delta_conv that is not
-    below delta_pole_warn, and a delta_max_iter
-    that is not a positive integer."""
+    below delta_pole_warn, a delta_max_iter
+    that is not a positive integer, and a delta_occupation_floor that is not
+    a finite positive occupation."""
     srg_s: Optional[float] = DOWNFOLDING_SRG_S
     pole_margin: float = DOWNFOLDING_POLE_MARGIN
     continuation_margin: float = DOWNFOLDING_CONTINUATION_MARGIN
@@ -595,6 +602,7 @@ class DownfoldingNumerics:
     delta_weight_floor: float = DOWNFOLDING_DELTA_WEIGHT_FLOOR
     delta_degenerate: float = DOWNFOLDING_DELTA_DEGENERATE
     delta_linearization_warn: float = DOWNFOLDING_DELTA_LINEARIZATION_WARN
+    delta_occupation_floor: float = DOWNFOLDING_DELTA_OCCUPATION_FLOOR
 
     def __post_init__(self):
         if self.srg_s is not None and not (math.isfinite(self.srg_s)
@@ -639,6 +647,11 @@ class DownfoldingNumerics:
             raise ValueError(f'delta_linearization_warn='
                              f'{self.delta_linearization_warn!r}: a positive '
                              'energy, Hartree')
+        if not (math.isfinite(self.delta_occupation_floor)
+                and self.delta_occupation_floor > 0):
+            raise ValueError(f'delta_occupation_floor='
+                             f'{self.delta_occupation_floor!r}: a finite '
+                             'positive occupation')
 
 
 @dataclass(frozen=True)

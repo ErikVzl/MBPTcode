@@ -43,6 +43,18 @@ build_effective_hamiltonian(low, active_space, spin_free, delta,
     numerics    None (the run's) | a Numerics whose downfolding section
                 (srg_s, pole_margin, continuation_margin) replaces the run's
 
+h.solve(solver, delta_method, out, **solve options)
+    delta_method None (= 'linearized') | 'lowdin' | 'static_sa' |
+                'static_mf' | False: with a coupling on the record (a
+                rotated basis), Delta by linearized | exact Loewdin | the
+                static form D_SA (after h.prepare_delta(states)) | at the
+                mean-field energies | no Delta ('delta_off'); without a
+                coupling, None or False only. Each total is the active
+                energy of one model plus that model's constant: out['e0'],
+                out['e_active'] (DownfoldedHamiltonian.solve)
+h.static_hamiltonian(delta_method)  {0: constant, 1: h, 2: v} for a solver
+                outside solve: 'static_sa', 'static_mf' or False
+
 The general layer (low_level.py, spin.py, core.py, double_counting.py,
 zero_body.py, one_body.py, two_body.py, hybridization.py (the Fock coupling
 a rotated orbital basis creates between active and environment orbitals)

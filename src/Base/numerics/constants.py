@@ -417,6 +417,17 @@ DOWNFOLDING_DELTA_DEGENERATE = 1e-8
 # (Z close to 1), whose error is second order in the coupling, so such states
 # do not flag.
 DOWNFOLDING_DELTA_LINEARIZATION_WARN = 1e-3
+# The static form 'static_sa' averages the removal energies of the active
+# virtual orbitals over the states, Omega = gamma^-1/2 M1 gamma^-1/2, with
+# gamma the averaged occupation of those orbitals; a direction of gamma whose
+# occupation is below this is dropped, since no state of the average removes
+# an electron from it and its removal energy is 0/0. The ground state of a
+# weakly correlated molecule leaves some active virtual directions nearly
+# empty. 1e-6 lies below the smallest such occupation measured on water/6-31G
+# (3e-5: the FCI ground state of an NO CAS(4,4) whose second active virtual is
+# the last virtual NO) and far above the rounding of an exactly empty
+# direction.
+DOWNFOLDING_DELTA_OCCUPATION_FLOOR = 1e-6
 # The memory, in GB, the dense Delta methods ('lowdin', 'linearized') may take
 # outside a Slurm job when numerics.layout.delta_dense_gb is None; inside one
 # the default is the share of the allocation (`allocation_max_memory_mb`).

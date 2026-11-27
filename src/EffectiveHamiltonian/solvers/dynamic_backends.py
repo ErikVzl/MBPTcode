@@ -61,6 +61,16 @@ that size, so a root on a pole is finite, never inf or NaN. The algebra is
 the kernel `delta_roots`, on dense arrays only, which knows neither the
 engine nor the spin structure of the integrals: it is tested with two spin channels and both kinds of side on a
 model.
+
+Each root also reports how many solutions of the Delta problem lie below it
+(extra['solutions_below']), so that a caller can tell whether a state that
+was not handed in went below a refined one. Below the lowest pole every
+eigenvalue of H_eff(E) decreases with E and meets the line lambda = E once,
+so the eigenvalues of H_eff(E_k) below E_k are the solutions below E_k
+(above poles the count is that number minus the poles below E_k:
+Haynsworth's inertia additivity on the explicit P + Q matrix). The
+dynamic backends do not sort: `solvers.solve.solve` sorts the refined roots
+and raises DeltaRootsCrossedWarning from these counts.
 """
 import math
 from dataclasses import dataclass, field
@@ -70,7 +80,8 @@ import scipy.linalg
 
 from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (BYTES_PER_GB,
-                                         DOWNFOLDING_DELTA_DENSE_GB, MB_PER_GB,
+                                         DOWNFOLDING_DELTA_DENSE_GB,
+                                         FCI_SPIN_SQUARE_TOL, MB_PER_GB,
                                          QP_WINDOW_Z_MIN)
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
@@ -105,6 +116,18 @@ class DeltaNotConverged(RuntimeWarning):
     before one step moved E by less than delta_conv; the last E is kept."""
 
 
+class DeltaRootsCrossedWarning(RuntimeWarning):
+    """The refined roots of a Delta solve are not the static states in
+    their order, two flags, raised by `solvers.solve.solve`.
+    'delta_roots_reordered': Delta moved two returned roots past each other,
+    so sorting the result ascending changed their order; out['static_index']
+    maps each returned root to its static state. 'delta_roots_missing': more
+    solutions of the Delta problem lie below a returned root than there are
+    returned roots below it, so a state that the static solve did not
+    compute went below it; asking for more roots (nroots + 1 or more)
+    computes it."""
+
+
 @dataclass(frozen=True)
 class DeltaResult:
     """The states of one static solve refined with Delta, in the order they
@@ -115,8 +138,15 @@ class DeltaResult:
     min_denominator (nroots,): the smallest |E - E_M -+ lam| over the poles
     whose weight (b_e . <M|a|c>)^2 exceeds delta_weight_floor (inf where
     none does); vectors: one array per root, of the shape the vector handed
-    in had, unit Euclidean norm; converged (nroots,) bool; extra: what one
-    method reports beyond these. 'linearized' reports
+    in had, unit Euclidean norm; converged (nroots,) bool; extra: what a
+    method reports beyond these. Both dense methods report
+    extra['solutions_below'] (nroots,) int, the eigenvalues of H_eff(E_k) of
+    the requested spin (refine's `spin`; every one for spin None) other than
+    the root's own and those of its degenerate set, lying more than
+    delta_degenerate below the root's own eigenvalue: the solutions of the
+    Delta problem below the root (module docstring), and
+    extra['near_pole'] (nroots,) bool, True where the root was flagged
+    'delta_near_pole'. 'linearized' also reports
     extra['linearization_error'] (nroots,), its error estimate
     Z |<c|H_eff(E)|c> - E| in Ha, and extra['linearization_point']
     (nroots,), the E0 each root was linearized at."""
@@ -254,7 +284,8 @@ def _min_denominator(sectors, energy, c, floor):
     return best
 
 
-def delta_roots(h_n, sectors, energies, vectors, method, numerics):
+def delta_roots(h_n, sectors, energies, vectors, method, numerics,
+                keep=None):
     """The states (energies, vectors) of the P-space matrix h_n refined with
     Delta (module docstring), a `DeltaResult` in the order handed in.
 
@@ -266,8 +297,13 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics):
     (n_levels,) and b (n_orbitals, n_levels). energies, vectors: states of
     h_n (vectors of any shape with dim K entries). method: 'lowdin' or
     'linearized'. numerics: a `Numerics` (None: the defaults), its
-    downfolding section the settings. No sector at all is no Delta: the
-    static states as handed in, Z = 1."""
+    downfolding section the settings. keep: None, or a function of one
+    eigenvector of H_eff (flat, dim K) that says whether it is a state of
+    the request, applied to the eigenvectors that extra['solutions_below']
+    counts (refine passes the test of the requested spin); None counts every
+    one. No sector at all is no Delta: the static states as handed in, Z = 1,
+    and extra['solutions_below'] counts the states handed in below each
+    one, which are the lowest of the static solve."""
     if method not in DENSE_MATRICES:
         raise ValueError(f'method={method!r}: the dense Delta methods are '
                          f'{sorted(DENSE_MATRICES)}')
@@ -279,12 +315,21 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics):
     if len(flat) != len(static):
         raise ValueError(f'{len(static)} energies and {len(flat)} vectors')
     n = len(static)
+    margin = settings.delta_degenerate
     if not sectors:
         # nothing is folded: the linearization error is zero and the point
-        # is the static energy
-        extra = ({'linearization_error': np.zeros(n),
-                  'linearization_point': static.copy()}
-                 if method == 'linearized' else {})
+        # is the static energy; the states handed in are the lowest of the
+        # static solve, so the solutions below a state are those of them
+        # below it, outside its degenerate set
+        below = np.zeros(n, dtype=int)
+        for members in degenerate_sets(static, numerics):
+            lower = static < static[members].mean() - margin
+            lower[members] = False
+            below[members] = np.count_nonzero(lower)
+        extra = {'solutions_below': below, 'near_pole': np.zeros(n, bool)}
+        if method == 'linearized':
+            extra.update(linearization_error=np.zeros(n),
+                         linearization_point=static.copy())
         return DeltaResult(static.copy(), static, np.ones(n), np.full(n, np.inf),
                            [v.reshape(s) for v, s in zip(flat, shapes)],
                            np.ones(n, dtype=bool), extra)
@@ -293,10 +338,11 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics):
     solve = _lowdin if method == 'lowdin' else _linearized
     out_e, out_c, converged = np.empty(n), [None] * n, np.ones(n, dtype=bool)
     point, point_distance = np.full(n, np.nan), np.full(n, np.inf)
+    below = np.zeros(n, dtype=int)
     for members in degenerate_sets(static, numerics):
         starts = np.column_stack([flat[k] for k in members])
-        e_set, c_set, ok, e0 = solve(h_n, sectors, static[members], starts,
-                                     settings)
+        e_set, c_set, ok, e0, below[members] = solve(
+            h_n, sectors, static[members], starts, settings, keep)
         if e0 is not None:
             # the linearization point, and how close it lies to a pole the
             # states handed in see
@@ -321,17 +367,17 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics):
     smallest = np.array([_min_denominator(sectors, e, c,
                                           settings.delta_weight_floor)
                          for e, c in zip(out_e, out_c)])
-    extra = {}
+    near = (smallest < settings.delta_pole_warn) | (
+        point_distance < settings.delta_pole_warn)
+    extra = {'solutions_below': below, 'near_pole': near}
     if method == 'linearized':
         # Z |<c|H_eff(E)|c> - E|: the residual of the root in the exact
         # H_eff(E), turned into an energy by the Newton step of Loewdin
         residual = np.array([float(c @ h_n @ c)
                              + _expectation(sectors, e, c, False) - e
                              for e, c in zip(out_e, out_c)])
-        extra = {'linearization_error': z * np.abs(residual),
-                 'linearization_point': point}
-    near = (smallest < settings.delta_pole_warn) | (
-        point_distance < settings.delta_pole_warn)
+        extra.update(linearization_error=z * np.abs(residual),
+                     linearization_point=point)
     for k in np.flatnonzero(near):
         where = (f'lies {smallest[k]:.2e} Ha from a pole E_M -+ lam'
                  if smallest[k] < settings.delta_pole_warn else
@@ -381,49 +427,71 @@ def degenerate_sets(energies, numerics):
 
 
 def _select(values, vecs, overlaps):
-    """(energies, vectors) of the n roots whose vectors weigh most on the
+    """(energies, vectors, chosen) of the n roots whose vectors weigh most on the
     previous set: `overlaps` (n_roots, n), each root's overlaps with the n
     previous vectors in the metric of the method. The n roots are rotated
     among themselves to lie closest to the previous vectors (the orthogonal
     Procrustes rotation U V^T of the SVD of their overlap matrix), so that a
     degenerate set comes back as distinct states aligned to those handed in;
     each energy is the expectation value of the rotated root, the eigenvalue
-    itself for a set of one or an exactly degenerate one."""
+    itself for a set of one or an exactly degenerate one; chosen, the
+    indices of the n roots among `values`."""
     n = overlaps.shape[1]
     chosen = np.sort(np.argsort(-(overlaps ** 2).sum(1), kind='stable')[:n])
     u, _, vt = np.linalg.svd(overlaps[chosen])
     rotation = u @ vt
-    return (rotation ** 2).T @ values[chosen], vecs[:, chosen] @ rotation
+    return ((rotation ** 2).T @ values[chosen], vecs[:, chosen] @ rotation,
+            chosen)
 
 
-def _lowdin(h_n, sectors, energies, starts, settings):
-    """(energies, vectors, converged, None) of one degenerate set (one state, or
-    the partners of a degenerate one), starts (dim K, n): at the set's
-    common E, the n eigenvalues of H_eff(E) whose vectors overlap most with
-    the previous ones, E their mean, until one step moves E by less than
-    delta_conv. For one state this is the eigenvalue whose vector overlaps
-    most with the previous one."""
+def _solutions_below(values, vecs, chosen, margin, keep):
+    """How many eigenvalues of H_eff(E) (values ascending, vecs their
+    eigenvectors), outside `chosen`, the set's own, lie more than `margin`
+    below the mean of the set's own eigenvalues and are accepted by `keep`
+    (None: every one). An eigenvalue within `margin` of the set's own is a
+    degenerate partner, not a solution below it."""
+    own = float(np.mean(values[chosen]))
+    others = np.setdiff1d(np.flatnonzero(values < own - margin), chosen)
+    if keep is None:
+        return len(others)
+    return sum(1 for i in others if keep(vecs[:, i]))
+
+
+def _lowdin(h_n, sectors, energies, starts, settings, keep):
+    """(energies, vectors, converged, None, below) of one degenerate set (one
+    state, or the partners of a degenerate one), starts (dim K, n): at the
+    set's common E, the n eigenvalues of H_eff(E) whose vectors overlap most
+    with the previous ones, E their mean, until one step moves E by less
+    than delta_conv. For one state this is the eigenvalue whose vector
+    overlaps most with the previous one. below: `_solutions_below` from the
+    spectrum of the last step, whose E is within delta_conv of the result."""
     energy, previous, converged = float(np.mean(energies)), starts, False
+    vecs = None
     for _ in range(settings.delta_max_iter):
+        vecs = None                    # one dim(K)^2 matrix less in the fold
         h = _fold(sectors, energy, len(h_n))
         h += h_n
         values, vecs = np.linalg.eigh(h)
         del h
-        found, previous = _select(values, vecs, vecs.T @ previous)
-        del vecs
+        found, previous, chosen = _select(values, vecs, vecs.T @ previous)
         step = float(np.mean(found)) - energy
         energy = float(np.mean(found))
         if abs(step) < settings.delta_conv:
             converged = True
             break
-    return found, previous, converged, None
+    below = _solutions_below(values, vecs, chosen, settings.delta_degenerate,
+                             keep)
+    return found, previous, converged, None, below
 
 
-def _linearized(h_n, sectors, energies, starts, settings):
-    """(energies, vectors, True, E0) of one degenerate set, starts (dim K, n):
-    the Z-estimate E0 = E_K + g / (1 - g') (the mean over the set), then the
-    n roots of (H_N + D0 - E0 D1) c = E (1 - D1) c with the largest weight
-    <c|(1 - D1)|K> on the states handed in."""
+def _linearized(h_n, sectors, energies, starts, settings, keep):
+    """(energies, vectors, True, E0, below) of one degenerate set, starts
+    (dim K, n): the Z-estimate E0 = E_K + g / (1 - g') (the mean over the
+    set), then the n roots of (H_N + D0 - E0 D1) c = E (1 - D1) c with the
+    largest weight <c|(1 - D1)|K> on the states handed in. below:
+    `_solutions_below` from the spectrum of H_eff at the set's result E (one
+    more fold), the set's own eigenvalues those whose vectors weigh most on
+    the roots found."""
     e0 = float(np.mean([
         e + _expectation(sectors, e, k, False)
         / (1.0 - _expectation(sectors, e, k, True))
@@ -438,8 +506,17 @@ def _linearized(h_n, sectors, energies, starts, settings):
     values, vecs = scipy.linalg.eigh(a, metric, overwrite_a=True,
                                      overwrite_b=True)
     del a, metric
-    found, vectors = _select(values, vecs, vecs.T @ target)
-    return found, vectors, True, e0
+    found, vectors, _ = _select(values, vecs, vecs.T @ target)
+    del vecs
+    h = _fold(sectors, float(np.mean(found)), len(h_n))
+    h += h_n
+    values, vecs = np.linalg.eigh(h)
+    del h
+    unit = vectors / np.linalg.norm(vectors, axis=0)
+    _, _, chosen = _select(values, vecs, vecs.T @ unit)
+    below = _solutions_below(values, vecs, chosen, settings.delta_degenerate,
+                             keep)
+    return found, vectors, True, e0, below
 
 
 # ------------------------------------------------------------ the backends
@@ -484,14 +561,18 @@ class EnergyDependentSolver:
                     out.append((kind, s, tuple(target), lam, b))
         return out
 
-    def refine(self, h1, eri, norb, nelec, energies, vectors):
+    def refine(self, h1, eri, norb, nelec, energies, vectors, spin=None):
         """The states (energies, vectors) of the static Hamiltonian (h1, eri)
         in the sector nelec, as the engine's `roots` returned them, refined
         with Delta: a `DeltaResult`, energies without a constant, in the
         order handed in, vectors the engine's CI arrays of unit norm.
-        Refused (ValueError) before anything is allocated when the dense
-        estimate exceeds the limit (`dense_memory_gb`,
-        `dense_memory_limit_gb`)."""
+        spin: None, or the 2S of the request the states belong to; then
+        extra['solutions_below'] counts only the eigenvectors of H_eff of
+        total spin S (`spin_square`, within FCI_SPIN_SQUARE_TOL of S(S+1)):
+        the sector nelec also holds states of higher spin, which are not
+        states of the request. Refused (ValueError) before anything is
+        allocated when the dense estimate exceeds the limit
+        (`dense_memory_gb`, `dense_memory_limit_gb`)."""
         if self.method is None:
             raise NotImplementedError('EnergyDependentSolver is the base of '
                                       'the dynamic backends')
@@ -500,6 +581,14 @@ class EnergyDependentSolver:
         if not plan:
             return delta_roots(None, [], energies, vectors, self.method,
                                self.numerics)
+        keep = None
+        if spin is not None:
+            want = 0.25 * spin * (spin + 2)
+            shape = sector_shape(norb, nelec)
+
+            def keep(v):
+                return abs(self.spin_square(v.reshape(shape), norb, nelec)
+                           - want) < FCI_SPIN_SQUARE_TOL
         dim_k = math.prod(sector_shape(norb, nelec))
         dims_m = [math.prod(sector_shape(norb, p[2])) for p in plan]
         estimate = dense_memory_gb(dim_k, dims_m, self.method)
@@ -514,7 +603,21 @@ class EnergyDependentSolver:
         h_n = self.engine.sector_matrix(h1, eri, norb, nelec)
         sectors = [self.sector(h1, eri, norb, nelec, *p) for p in plan]
         return delta_roots(h_n, sectors, energies, vectors, self.method,
-                           self.numerics)
+                           self.numerics, keep)
+
+    def spin_square(self, vector, norb, nelec):
+        """<S^2> of a CI array of the sector nelec, from the engine's
+        operators alone: S_z (S_z + 1) + |S_+ c|^2 / |c|^2 with
+        S_+ = sum_p a+_{p alpha} a_{p beta}."""
+        n_alpha, n_beta = nelec
+        s_z = 0.5 * (n_alpha - n_beta)
+        flip = 0.0
+        if n_beta > 0 and n_alpha < norb:
+            raised = sum(self.engine.create(
+                self.engine.annihilate(vector, norb, nelec, p, 1), norb,
+                (n_alpha, n_beta - 1), p, 0) for p in range(norb))
+            flip = float(np.vdot(raised, raised))
+        return s_z * (s_z + 1.0) + flip / float(np.vdot(vector, vector))
 
     def sector(self, h1, eri, norb, nelec, kind, sigma, target, lam, b):
         """(kind, e_m, amp, lam, b) of one sector for `delta_roots`: the

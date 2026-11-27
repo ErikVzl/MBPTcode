@@ -19,12 +19,36 @@ For canonical orbitals F_s is diagonal and the coupling is identically zero
 on any reference. X = F - F_s, the exchange part Sigma_x - v_xc of the bare
 Fock operator on a reference that is not HF, is not folded between active
 and environment orbitals (spec 6e); its norms are reported.
+
+Delta itself is energy dependent, Delta_tu(w) = sum_e b_te b_ue / (w - lam_e)
+(particle side) + sum_i b_ti b_ui / (w - lam_i) (hole side), and is solved by
+the dynamic backends of solvers/dynamic_backends.py. Its two static forms
+live here: a one-body matrix D added to h, and a constant c added to the
+energy, D_tu = 1/2 [Delta_tu(w_t) + Delta_tu(w_u)] at one energy per
+orbital:
+
+- 'static_mf' (`static_mf_delta`): w = the mean-field orbital energies
+  eps_active; nothing is solved first.
+- 'static_sa' (`state_averaged_delta`): w = the removal energies of the
+  active virtual orbitals averaged over a declared set of states, from their
+  density matrices (`removal_moment`); the record builds it once with
+  `DownfoldedHamiltonian.prepare_delta` and keeps it as `Coupling.d_sa`.
+
+The hole part of a static form is a one-body term with the sign of the
+particle one plus the constant c = -g tr(D_hole), g the spin weight
+(`spin_weight`): the static hole operator sum D_h a_t a+_u is a constant
+minus a one-body term.
 """
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from pyscf import scf
 from pyscf.scf.hf import get_jk
+
+from src.Base.numerics.numerics import numerics_or_default
+
+from .spin import spin_weight
 
 #: the two blocks a rotation inside the occupied and inside the virtual
 #: space can create: active virtual - environment virtual (particle side) and
@@ -34,12 +58,28 @@ COUPLING_BLOCKS = ('av_ev', 'ao_i')
 #: the blocks Delta folds by default
 DEFAULT_BLOCKS = ('av_ev',)
 
+#: the static forms of Delta: a one-body D added to h and a constant, solved
+#: by any solver
+STATIC_METHODS = ('static_sa', 'static_mf')
+
+#: the values of delta_method that `DownfoldedHamiltonian.solve` takes
+#: besides None (which is 'linearized') and False (no Delta)
+DELTA_METHODS = ('linearized', 'lowdin', 'sa_remainder') + STATIC_METHODS
+
 
 class DeltaOffWarning(UserWarning):
     """An active space on a rotated orbital basis built without Delta
     (`delta=False`): the coupling the rotation creates between active and
     environment orbitals is left out, and the result is the static
     Hamiltonian only."""
+
+
+class StaticDeltaWarning(UserWarning):
+    """delta_method='static_mf': Delta evaluated once, at the mean-field
+    orbital energies of the active orbitals, instead of at the energy of
+    each state. It is far from exact Loewdin, and further as the basis
+    grows (the message gives the benzene benchmark of the handoff), so it
+    warns on every use, with the flag 'delta_static_mf'."""
 
 
 @dataclass(frozen=True)
@@ -64,6 +104,10 @@ class Coupling:
         error on a density-fitted HF one.
     blocks: the blocks folded; the rows of a block not in `blocks` are zero.
     n_act_occ: the number of active occupied orbitals (the first rows).
+    d_sa: None, or (D, c), the static form 'static_sa' of Delta
+        (`state_averaged_delta`): D (n_act, n_act) is added to h and c to the
+        constant. Set by `DownfoldedHamiltonian.prepare_delta`, which
+        returns a copy of the record with it.
     """
     b_particle: np.ndarray
     lam_virtual: np.ndarray
@@ -74,6 +118,7 @@ class Coupling:
     left_out: dict
     blocks: tuple
     n_act_occ: int
+    d_sa: Optional[tuple] = None
 
     def sides(self):
         """The coupling as plain data for the dynamic backends of the
@@ -162,3 +207,111 @@ def fock_coupling(mf, mo_rotated, T, eps, active_space,
     return Coupling(b_particle, lam_virtual, b_hole, lam_occupied,
                     np.diag(sub(F, act, act)).copy(), norms, left_out,
                     tuple(blocks), n_occ)
+
+
+def removal_moment(h1, eri, dm1, dm2):
+    """The generalized Fock matrix of one state K, (norb, norb):
+
+        M1[t, u] = sum_q h1[u, q] dm1[t, q] + sum_qrs (uq|rs) dm2[t, q, r, s],
+
+    h1 and eri (chemist) the static active Hamiltonian K is an eigenstate
+    of, and dm1, dm2 its spin-summed density matrices in pyscf's convention,
+    dm1[p, q] = <q+ p>, dm2[p, q, r, s] = <p+ r+ s q>. For an eigenstate it
+    is the first moment of the removal energies,
+    sum_sigma <a_t K|(E_K - H^(N-1))|a_u K>, a symmetric matrix."""
+    return (np.einsum('uq,tq->tu', h1, dm1)
+            + np.einsum('uqrs,tqrs->tu', eri, dm2))
+
+
+def _static_block(b, lam, w):
+    """D_tu = 1/2 [Delta_tu(w_t) + Delta_tu(w_u)], Delta_tu(x) = sum_e b_te
+    b_ue / (x - lam_e), over the rows of b; rows of b that are zero give
+    zero rows and columns, and their w is not read."""
+    out = np.zeros((len(b), len(b)))
+    rows = np.flatnonzero(np.any(b != 0.0, axis=1))
+    if len(rows) == 0:
+        return out
+    br = b[rows]
+    at_t = (br / (w[rows, None] - lam[None, :])) @ br.T     # Delta_tu(w_t)
+    out[np.ix_(rows, rows)] = 0.5 * (at_t + at_t.T)
+    return out
+
+
+def static_mf_delta(coupling):
+    """(D, c): the static form 'static_mf' of Delta, at the mean-field
+    energies eps = coupling.eps_active (the diagonal of the bare Fock
+    operator on the active block, the operator the levels come from):
+
+        D_tu = 1/2 [Delta_tu(eps_t) + Delta_tu(eps_u)],
+        Delta_tu(w) = sum_e b_te b_ue / (w - lam_e)      particle side
+                    + sum_i b_ti b_ui / (w - lam_i)      hole side.
+
+    D is added to h. c = -g tr(D_hole), the hole part alone, g the spin
+    weight (2 for the one channel of a restricted reference), is added to
+    the energy: the static hole operator sum D_h a_t a+_u is a constant
+    minus a one-body term, and that one-body term has the sign of the
+    particle one. c is the same for every state, so excitation energies do
+    not see it and totals and barriers do. With the particle side alone
+    (the default blocks) c = 0. A plain function: the warning of
+    'static_mf' (StaticDeltaWarning) is raised where the method is chosen."""
+    eps = np.asarray(coupling.eps_active, dtype=float)
+    particle = _static_block(np.asarray(coupling.b_particle, dtype=float),
+                             np.asarray(coupling.lam_virtual, dtype=float),
+                             eps)
+    hole = _static_block(np.asarray(coupling.b_hole, dtype=float),
+                         np.asarray(coupling.lam_occupied, dtype=float), eps)
+    c = -spin_weight((coupling,)) * float(np.trace(hole))
+    return particle + hole, c
+
+
+def state_averaged_delta(h1, eri, coupling, rdms, numerics):
+    """(D, c): the static form 'static_sa' of Delta, D_SA, from a set of
+    states of the static Hamiltonian (h1, eri chemist), which enter with
+    equal weight. rdms: [(dm1, dm2), ...], one spin-summed pair per state
+    (pyscf's convention, `removal_moment`); numerics: a `Numerics` (None:
+    the defaults).
+
+    On the active virtual orbitals: gamma, the averaged dm1, and M1, the
+    averaged `removal_moment`. The eigenvectors V of gamma whose occupation
+    n is below numerics.downfolding.delta_occupation_floor are dropped: no
+    state of the average removes an electron from them, so they have no
+    removal energy, and D is zero along them. In the kept directions V_r,
+    Omega = n^-1/2 V_r^T M1 V_r n^-1/2 = U diag(w) U^T is the state-averaged
+    removal energy; in the orbitals V_r U, with b' = (V_r U)^T b,
+
+        D'_kl = 1/2 [Delta'_kl(w_k) + Delta'_kl(w_l)],
+        Delta'_kl(x) = sum_e b'_ke b'_le / (x - lam_e),
+
+    and D = (V_r U) D' (V_r U)^T on the active virtual block, zero
+    elsewhere. The particle side only: a coupling with a hole side is
+    refused (NotImplementedError, Task 13), and c = 0. No state at all is
+    refused (ValueError)."""
+    if np.any(coupling.b_hole):
+        raise NotImplementedError(
+            'D_SA of a coupling with a hole side (active occupied - inactive '
+            'occupied, a rotated occupied block): its hole block and '
+            'constant are not built yet (Task 13).')
+    if not rdms:
+        raise ValueError('state_averaged_delta needs at least one state.')
+    floor = numerics_or_default(numerics).downfolding.delta_occupation_floor
+    n_act = len(coupling.eps_active)
+    av = np.arange(coupling.n_act_occ, n_act)
+    gamma = np.mean([np.asarray(dm1)[np.ix_(av, av)] for dm1, _ in rdms],
+                    axis=0)
+    m1 = np.mean([removal_moment(h1, eri, dm1, dm2)[np.ix_(av, av)]
+                  for dm1, dm2 in rdms], axis=0)
+    occupation, v = np.linalg.eigh(0.5 * (gamma + gamma.T))
+    kept = occupation > floor
+    d = np.zeros((n_act, n_act))
+    if not np.any(kept):
+        return d, 0.0
+    v_r = v[:, kept]
+    scale = 1.0 / np.sqrt(occupation[kept])
+    omega = scale[:, None] * (v_r.T @ m1 @ v_r) * scale[None, :]
+    w, u = np.linalg.eigh(0.5 * (omega + omega.T))
+    orbitals = v_r @ u
+    b = orbitals.T @ np.asarray(coupling.b_particle, dtype=float)[av]
+    d_prime = _static_block(b, np.asarray(coupling.lam_virtual, dtype=float),
+                            w)
+    d[np.ix_(av, av)] = orbitals @ d_prime @ orbitals.T
+    return d, 0.0

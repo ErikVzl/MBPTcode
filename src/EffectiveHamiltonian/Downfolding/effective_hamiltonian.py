@@ -26,14 +26,15 @@ them up: E_0 in zero_body.py, h_eff in one_body.py, v_eff in two_body.py.
 `pack` here writes them into the g_eff dictionary the active-space solvers
 read (src/EffectiveHamiltonian/solvers/solve.py).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import numpy as np
 from pyscf import scf
 
-from src.Base.numerical_flags import collecting, flag, gathered
-from src.Base.numerics.numerics import numerics_or_default
+from src.Base.numerical_flags import (collecting, flag, flags_into_out,
+                                      gathered)
+from src.Base.numerics.numerics import Numerics, numerics_or_default
 from src.Base.orbital_spaces import closed_shell_nocc, unrestricted_nocc
 from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             get_orbital_energies,
@@ -47,12 +48,15 @@ from src.EffectiveHamiltonian.orbital_basis import (orbitals_source,
                                                     semicanonical_rotation)
 from src.EffectiveHamiltonian.solvers.determinants import (
     spatial_to_spin_orbitals)
-from src.EffectiveHamiltonian.solvers.solve import solve
+from src.EffectiveHamiltonian.solvers.solve import (ENGINES, SolveRequest,
+                                                    solve, static_states)
 
 from .core import core_terms
 from .double_counting import double_counting
-from .hybridization import (DEFAULT_BLOCKS, Coupling, DeltaOffWarning,
-                            fock_coupling)
+from .hybridization import (DEFAULT_BLOCKS, DELTA_METHODS, STATIC_METHODS,
+                            Coupling, DeltaOffWarning, StaticDeltaWarning,
+                            fock_coupling, state_averaged_delta,
+                            static_mf_delta)
 from .methods import LOW_LEVEL
 from .one_body import effective_one_body
 from .spin import SPINS
@@ -210,26 +214,47 @@ def _require_delta_route(spaces, delta):
             'Hamiltonian only.')
 
 
+#: the options of the DMRG static solve that `prepare_delta` passes on
+DMRG_OPTIONS = ('dmrg_bond_dim', 'dmrg_n_sweeps')
+
+
 @dataclass(frozen=True, eq=False)
 class DownfoldedHamiltonian:
     """One effective Hamiltonian, as `build_effective_hamiltonian` returns it.
 
-    g_eff: {0: e0_without_delta, 1: h_eff, 2: v_eff}, the input of the
-        active-space solvers: the decoupled active space, all three parts, so
-        g_eff[0] is energies.e0_without_delta, the constant without the Delta
-        term e_c_hybridization (zero_body.py); with a coupling on the record
-        energies.e0, every term, is the constant of the model with Delta, and
-        the two differ by e_c_hybridization. space: the active space in QDPT's
-        form (n_orbs, n_elec_active, the index arrays, spin_free,
-        active_space, and for an unrestricted reference spin_overlap).
-        energies: the `Energies`, every term of E_0. diagnostics: the
-        low-level method's checks, keyed by name. numerical_flags: the named
-        flags behind this Hamiltonian (src.Base.numerical_flags), each
-        {'flag': name, 'message': text}; empty for a clean result.
-        hybridization: the Fock coupling (`Coupling`, hybridization.py)
-        between the active and the environment orbitals of an active space on
-        a rotated orbital basis, the term Delta folds; None for canonical
-        orbitals and with delta=False.
+    g_eff: {0: e0_without_delta, 1: h_eff, 2: v_eff}, the static Hamiltonian
+        of the decoupled active space, all three parts of it, the input of
+        the active-space solvers. Its constant g_eff[0] is
+        energies.e0_without_delta, E_0 without the one Delta term
+        e_c_hybridization (zero_body.py), and nothing in g_eff contains
+        Delta. With a coupling on the record (`hybridization`, an active
+        space on a rotated orbital basis) g_eff is not the whole
+        Hamiltonian: the model of the active space coupled to its
+        environment is g_eff together with the coupling, and its constant
+        is energies.e0 (`g_eff_is_static_part`). A total energy then comes
+        from `solve`, which pairs each active energy with the constant of
+        its own model; a Hamiltonian for a solver outside `solve` comes from
+        `static_hamiltonian`. g_eff[0] plus a solve of (h_eff, v_eff) by
+        hand is the energy without Delta. Without a coupling (canonical
+        orbitals, or delta=False) e0, e0_without_delta and g_eff[0] are one
+        number and g_eff is the whole Hamiltonian.
+    space: the active space in QDPT's form (n_orbs, n_elec_active, the
+        index arrays, spin_free, active_space, and for an unrestricted
+        reference spin_overlap).
+    energies: the `Energies`, every term of E_0; energies.e0 is the constant
+        of the model with Delta, energies.e0_without_delta that of g_eff.
+    diagnostics: the low-level method's checks, keyed by name.
+    numerical_flags: the named flags behind this Hamiltonian
+        (src.Base.numerical_flags), each {'flag': name, 'message': text};
+        empty for a clean result.
+    hybridization: the Fock coupling (`Coupling`, hybridization.py) between
+        the active and the environment orbitals of an active space on a
+        rotated orbital basis, the term Delta folds; None for canonical
+        orbitals and with delta=False. Its d_sa holds D_SA once
+        `prepare_delta` has built it.
+    numerics: the `Numerics` in force for this Hamiltonian, as the build
+        resolved it (the build's numerics when given, else the low-level
+        run's, else the defaults); `solve` hands it to the Delta solvers.
     """
     g_eff: dict
     space: dict
@@ -237,21 +262,316 @@ class DownfoldedHamiltonian:
     diagnostics: dict
     numerical_flags: list
     hybridization: Optional[Coupling] = None
+    numerics: Optional[Numerics] = None
 
-    def solve(self, solver, **kwargs):
+    @property
+    def g_eff_is_static_part(self):
+        """True when the record has a coupling (`hybridization`): g_eff is
+        then the static part of the Hamiltonian only, and its constant
+        e0_without_delta is not the constant of the model with Delta."""
+        return self.hybridization is not None
+
+    @flags_into_out
+    def solve(self, solver, delta_method=None, out=None, **kwargs):
         """The lowest energies of this Hamiltonian by `solver`
-        (src.EffectiveHamiltonian.solvers.solve.solve), E_0 included: g_eff
-        solved as it is, so the constant is g_eff[0] =
-        energies.e0_without_delta and the energies are those of the
-        decoupled active space, without Delta. The
-        record's g_eff, orbital and electron counts and spin_free are filled
-        in, and for an unrestricted reference its spin_overlap, so <S^2>
-        can be reported (out=...). Other kwargs go to `solve`."""
+        (src.EffectiveHamiltonian.solvers.solve.solve), each a total: the
+        active energy E^A of one model plus the constant of the same model
+        (spec 6d). The record's orbital and electron counts and spin_free
+        are filled in, and for an unrestricted reference its spin_overlap,
+        so <S^2> can be reported; other kwargs (nroots, spin, symmetrize,
+        the DMRG settings) go to that function. The coupling, D_SA and the
+        numerics are the record's own: sides, d_sa and numerics in kwargs
+        are refused (TypeError).
+
+        delta_method (None, the default, is 'linearized'):
+
+        | record, delta_method | dict solved | E^A from | constant |
+        |---|---|---|---|
+        | no coupling, None or False | g_eff | (h, v) | g_eff[0] (= e0 there) |
+        | coupling, False | g_eff | (h, v) | e0_without_delta (= g_eff[0]); flag 'delta_off' |
+        | coupling, 'static_mf' or 'static_sa' | {0: e0 + c, 1: h + D, 2: v} | (h + D, v) | e0 + c |
+        | coupling, None/'linearized' or 'lowdin' | {0: e0, 1: h, 2: v} with the coupling | the static states of (h, v) refined with Delta | e0 |
+
+        e0 is energies.e0, h and v are g_eff[1] and g_eff[2], and (D, c)
+        the static form: D a one-body matrix added to h and c the constant
+        of its hole part (zero without a hole side). No path adds g_eff[0]
+        to an energy with Delta, and none adds e0 to one without.
+
+        - 'linearized' (the default): linearized Loewdin, one generalized
+          eigenproblem per state (LinearizedLowdinSolver). It flags a state
+          whose estimated linearization error is above
+          numerics.downfolding.delta_linearization_warn
+          ('delta_linearization'); for such a state use 'lowdin'.
+        - 'lowdin': exact Loewdin, the reference (LowdinSolver).
+        - 'static_mf': D at the mean-field orbital energies
+          (`static_mf_delta`), with StaticDeltaWarning and the flag
+          'delta_static_mf' on every use; any solver.
+        - 'static_sa': D_SA (`state_averaged_delta`), built beforehand by
+          `prepare_delta` and refused (ValueError) without it; any solver.
+        - 'sa_remainder': not built yet (NotImplementedError, Task 11).
+        - False: no Delta, with DeltaOffWarning and the flag 'delta_off'
+          when the record has a coupling.
+
+        The two dynamic methods run on the solvers whose backend has sector
+        operations ('pyscf_fci'); any other solver is refused before
+        anything is solved, naming the static forms. A record without a
+        coupling takes None or False and refuses a named method
+        (ValueError: there is nothing to fold). A record with a coupling
+        built with spin_free=False refuses every method but False
+        (NotImplementedError: the coupling is spatial).
+
+        With Delta the energies are returned in ascending order: Delta can
+        move two states past each other. out['static_index'] gives for each
+        returned root the static state it came from, and two flags of
+        DeltaRootsCrossedWarning report it: 'delta_roots_reordered' when
+        the order of the returned roots changed, and 'delta_roots_missing'
+        when a state that the static solve did not compute went below a
+        returned root (ask for more roots).
+
+        out, a dict, receives what the solver function writes: out['e0'],
+        the constant added, and out['e_active'], the E^A of each root, so
+        the energies are out['e0'] + out['e_active']; out['spin_square']
+        where the solver function reports it ('pyscf_fci'; for an
+        unrestricted reference from the record's spin_overlap);
+        out['numerical_flags'], every flag of the call (those of Delta and
+        'delta_off' and 'delta_static_mf' included); and with
+        'linearized' or 'lowdin' the per-root 'static', 'correction',
+        'z', 'min_denominator', 'converged', 'static_index' and the
+        method's extra entries. For a record with a coupling, False and the
+        static forms also give 'static' = out['e_active'], 'correction'
+        zero and 'z' one. E_0 for reporting is energies.e0, or out['e0']
+        for the constant of one solve; E^A is out['e_active'], never a
+        total minus a constant chosen by hand."""
+        supplied = sorted(k for k in ('sides', 'd_sa', 'numerics')
+                          if k in kwargs)
+        if supplied:
+            raise TypeError(
+                f'{supplied} are not options of DownfoldedHamiltonian.solve: '
+                f'the record supplies its coupling (sides), D_SA (d_sa, from '
+                f'prepare_delta) and its numerics itself.')
         if 'spin_overlap' in self.space:
             kwargs.setdefault('spin_overlap', self.space['spin_overlap'])
-        return solve(solver, self.g_eff, self.space['n_orbs'],
+        if self.hybridization is None:
+            if delta_method is not None and delta_method is not False:
+                raise ValueError(_nothing_to_fold(delta_method))
+            return self._solve(solver, self.g_eff, out, kwargs)
+        if delta_method is False:
+            # stacklevel 3: past the flags_into_out wrapper, the caller
+            flag('delta_off', _DELTA_OFF, DeltaOffWarning, stacklevel=3)
+            energies = self._solve(solver, self.g_eff, out, kwargs)
+            _static_parts(out)
+            return energies
+        method = self._method(delta_method)
+        if method in STATIC_METHODS:
+            energies = self._solve(solver, self._static_form(method, 4), out,
+                                   kwargs)
+            _static_parts(out)
+            return energies
+        coupled = {0: self.energies.e0, 1: self.g_eff[1], 2: self.g_eff[2]}
+        return self._solve(solver, coupled, out, dict(
+            kwargs, sides=self.hybridization.sides(), delta_method=method,
+            numerics=self.numerics))
+
+    def static_hamiltonian(self, delta_method):
+        """A static Hamiltonian in the layout of g_eff, for a solver outside
+        `solve`, whose constant already matches its one-body part: the
+        total is its constant plus that solver's energy.
+
+        'static_sa' and 'static_mf': {0: e0 + c, 1: h + D, 2: v}, e0 =
+        energies.e0 and (D, c) the static form (`solve`), with the same
+        refusals and warning as there ('static_sa' needs `prepare_delta`;
+        'static_mf' warns StaticDeltaWarning with the flag
+        'delta_static_mf'; a record without a coupling has nothing to fold,
+        ValueError; one built with spin_free=False, NotImplementedError).
+        False: g_eff itself, {0: e0_without_delta, 1: h, 2: v}, the
+        decoupled model, with DeltaOffWarning (flag 'delta_off') when the
+        record has a coupling; this function has no `out`, so the warning
+        is the signal. Any other method has no static form (ValueError):
+        the dynamic methods are solved by `solve`."""
+        if delta_method is False:
+            if self.hybridization is not None:
+                flag('delta_off', _DELTA_OFF, DeltaOffWarning)
+            return self.g_eff
+        if isinstance(delta_method, bool) or delta_method not in STATIC_METHODS:
+            raise ValueError(
+                f'delta_method={delta_method!r} has no static form: '
+                f'static_hamiltonian takes {STATIC_METHODS} or False. The '
+                f"dynamic methods ('linearized', 'lowdin', 'sa_remainder') "
+                f'depend on the energy of each state and are solved by '
+                f'solve.')
+        if self.hybridization is None:
+            raise ValueError(_nothing_to_fold(delta_method))
+        self._require_spin_free()
+        return self._static_form(delta_method, 3)
+
+    def prepare_delta(self, states, solver='pyscf_fci', **solver_opts):
+        """A copy of this record whose hybridization.d_sa is D_SA, the
+        static form 'static_sa' of Delta (`state_averaged_delta`), built
+        from a declared set of states that enter with equal weight; solve
+        it with h.solve(solver, delta_method='static_sa').
+
+        states: ((n, spin), ...), each pair the number of states and the
+        spin of one request as `solve` takes them (spin None: the lowest n
+        states at the active Sz, of any spin; 2S: the lowest n of total
+        spin S). The requests must not overlap: a spin=None request already
+        holds states of every spin and takes no other request, and
+        otherwise there is at most one request per spin (ValueError). If no
+        request has spin None or the spin of the reference (0 for a closed
+        shell), the request (1, reference spin) is added, so the ground
+        state is always in the average. For each request the static states
+        of g_eff are solved by `solver` (`static_states`), and the density
+        matrices of each state are taken before the next request runs (the
+        DMRG backend keeps only the states of its last solve).
+
+        solver: a backend with density matrices ('pyscf_fci', the default,
+        or 'dmrg'; any other is refused, ValueError); 'dmrg' refuses a
+        request with spin=None (an SU2 solve is one total spin).
+        solver_opts: the DMRG settings dmrg_bond_dim and dmrg_n_sweeps, as
+        `solve` takes them. Refused: a record without a coupling
+        (ValueError: there is nothing to fold) and one built with
+        spin_free=False (NotImplementedError). D_SA depends on the set of
+        states, so two solves that are compared (another nroots, another
+        spin) share one prepared record."""
+        unknown = sorted(set(solver_opts) - set(DMRG_OPTIONS))
+        if unknown:
+            raise TypeError(f'prepare_delta takes the DMRG settings '
+                            f'{DMRG_OPTIONS}; got {unknown}.')
+        if self.hybridization is None:
+            raise ValueError(_nothing_to_fold('static_sa'))
+        self._require_spin_free()
+        if solver not in ENGINES:
+            raise ValueError(f'solver={solver!r} is not a backend of the '
+                             f'solvers; choose one of {tuple(ENGINES)}.')
+        if not ENGINES[solver].has_rdms:
+            with_rdms = tuple(n for n, c in ENGINES.items() if c.has_rdms)
+            raise ValueError(
+                f'solver={solver!r}: D_SA is built from the one- and '
+                f'two-particle density matrices of the states, which its '
+                f'backend {ENGINES[solver].__name__} does not give; the '
+                f'backends with density matrices are {with_rdms}.')
+        requests = self._requests(states, solver)
+        rdms, st = [], None
+        for n, spin in requests:
+            st = static_states(solver, SolveRequest(
+                self.g_eff, self.space['n_orbs'], self.space['n_elec_active'],
+                spin_free=True, nroots=n, spin=spin, **solver_opts))
+            # now, before the next request replaces the states
+            rdms.extend(st.engine.rdms(v, st.norb, st.sector, spin=None)
+                        for v in st.vectors)
+        d_sa = state_averaged_delta(st.h1, st.eri, self.hybridization, rdms,
+                                    self.numerics)
+        return replace(self, hybridization=replace(self.hybridization,
+                                                   d_sa=d_sa))
+
+    def _solve(self, solver, g_eff, out, kwargs):
+        return solve(solver, g_eff, self.space['n_orbs'],
                      self.space['n_elec_active'],
-                     spin_free=self.space['spin_free'], **kwargs)
+                     spin_free=self.space['spin_free'], out=out, **kwargs)
+
+    def _method(self, delta_method):
+        """The Delta method of a record with a coupling: None is
+        'linearized'; an unknown name is refused (ValueError), every method
+        on a spin_free=False record (NotImplementedError), 'sa_remainder'
+        until it is built (NotImplementedError)."""
+        method = 'linearized' if delta_method is None else delta_method
+        if isinstance(method, bool) or method not in DELTA_METHODS:
+            raise ValueError(
+                f'delta_method={delta_method!r}: one of {DELTA_METHODS}, '
+                f"None (= 'linearized') or False (no Delta).")
+        self._require_spin_free()
+        if method == 'sa_remainder':
+            raise NotImplementedError(
+                "delta_method='sa_remainder', the remainder method, is not "
+                "built yet (Task 11).")
+        return method
+
+    def _require_spin_free(self):
+        if not self.space['spin_free']:
+            raise NotImplementedError(
+                'Delta on a record built with spin_free=False: the coupling '
+                'is written on the spatial active orbitals; build with '
+                'spin_free=True, or solve with delta_method=False for the '
+                'static Hamiltonian only.')
+
+    def _static_form(self, method, stacklevel):
+        """{0: e0 + c, 1: h + D, 2: v} of the static form `method`; the
+        warning of 'static_mf' points `stacklevel` frames up from here (as
+        for `flag`)."""
+        if method == 'static_mf':
+            flag('delta_static_mf',
+                 "delta_method='static_mf' evaluates Delta once, at the "
+                 "mean-field energies of the active orbitals: 0.8 eV from "
+                 "exact Loewdin in benzene, worse with basis size. Use "
+                 "'linearized' or 'lowdin' for energies, or 'static_sa' "
+                 "(prepare_delta) for a static Hamiltonian.",
+                 StaticDeltaWarning, stacklevel=stacklevel)
+            d, c = static_mf_delta(self.hybridization)
+        else:
+            if self.hybridization.d_sa is None:
+                raise ValueError(
+                    "delta_method='static_sa' needs D_SA, built once from a "
+                    "declared set of states: h = h.prepare_delta(((nroots, "
+                    "spin), ...)) first.")
+            d, c = self.hybridization.d_sa
+        return {0: self.energies.e0 + c, 1: self.g_eff[1] + d,
+                2: self.g_eff[2]}
+
+    def _requests(self, states, solver):
+        """The requests of `prepare_delta`, checked, with the ground state's
+        request added when no request holds it."""
+        try:
+            requests = [(n, spin) for n, spin in states]
+        except (TypeError, ValueError):
+            raise ValueError(f'states={states!r}: a sequence of pairs '
+                             f'(n, spin).') from None
+        for n, spin in requests:
+            if isinstance(n, bool) or not isinstance(n, (int, np.integer)) \
+                    or n < 1:
+                raise ValueError(f'states: n={n!r} in ({n!r}, {spin!r}) is '
+                                 f'not a positive number of states.')
+        spins = [spin for _, spin in requests]
+        if None in spins and len(requests) > 1:
+            raise ValueError(
+                f'states={states!r}: a request with spin=None holds the '
+                f'lowest states of every spin and takes no other request.')
+        if len(set(spins)) != len(spins):
+            raise ValueError(
+                f'states={states!r}: two requests of one spin overlap; ask '
+                f'for their states in one request.')
+        if solver == 'dmrg' and None in spins:
+            raise ValueError(
+                "solver='dmrg' solves one total spin per request; a request "
+                "with spin=None (every spin at the active Sz) is refused: "
+                "give the spin.")
+        reference = int(self.space['n_elec_active']) % 2
+        if None not in spins and reference not in spins:
+            requests.append((1, reference))
+        return requests
+
+
+#: the message of 'delta_off' when a record with a coupling is solved
+#: without Delta
+_DELTA_OFF = (
+    'solved with delta_method=False: the Fock coupling between the active '
+    'and the environment orbitals of this rotated basis is left out, and the '
+    'energies are those of the static Hamiltonian g_eff, with its constant '
+    'e0_without_delta.')
+
+
+def _nothing_to_fold(delta_method):
+    return (f'delta_method={delta_method!r}: this Hamiltonian has no coupling '
+            f'between its active and environment orbitals (canonical '
+            f'orbitals, or built with delta=False), so there is nothing to '
+            f'fold; solve it with delta_method=None or False.')
+
+
+def _static_parts(out):
+    """The Delta entries of `out` for a solve without a dynamic method
+    (False, the static forms): static = e_active, correction 0, z 1."""
+    if out is not None:
+        e_active = np.asarray(out['e_active'])
+        out.update(static=e_active.copy(), correction=np.zeros_like(e_active),
+                   z=np.ones(len(e_active)))
 
 
 def run_low_level(mf, method='rpa', **method_opts):
@@ -308,8 +628,9 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
                                 numerics=None, delta=True, _blocks=None,
                                 **method_opts):
     """The `DownfoldedHamiltonian` of `active_space`, downfolded from the
-    low-level result `low`: g_eff, space, energies, diagnostics and
-    numerical_flags. `h.solve(solver)` solves it.
+    low-level result `low`: g_eff, space, energies, diagnostics,
+    numerical_flags, hybridization and numerics. `h.solve(solver)` solves
+    it, with Delta when it has a coupling (`DownfoldedHamiltonian.solve`).
 
     g_eff and space follow QDPT's build_effective_hamiltonian, so g_eff goes
     straight to src.EffectiveHamiltonian.solvers.solve.solve:
@@ -452,7 +773,7 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         g_eff=g_eff, space=_space(mf, mo, spaces, spin_free),
         energies=energies, diagnostics=diagnostics,
         numerical_flags=gathered(inherited + flags),
-        hybridization=coupling)
+        hybridization=coupling, numerics=settings)
 
 
 def _check_terms(terms, method, unrestricted):
