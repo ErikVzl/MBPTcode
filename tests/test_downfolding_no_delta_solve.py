@@ -398,6 +398,131 @@ def test_solutions_below_are_those_of_the_pq_matrix(h):
     assert _names(out) == ['delta_roots_missing']
 
 
+def _shifted(h, shift, **kwargs):
+    """`solve` of the water NO record with the poles of its coupling moved
+    down by `shift` (lam - shift): a model with a low level, the way the
+    Task 8 near-pole test moves one. Returns (energies, out, caught,
+    first pole); the first pole is the lowest state of the (1, 2) sector
+    plus the lowest level."""
+    sides = [(kind, sigma, lam - shift, b)
+             for kind, sigma, lam, b in h.hybridization.sides()]
+    coupled = {0: h.energies.e0, 1: h.g_eff[1], 2: h.g_eff[2]}
+    out = {}
+    e, _, _, caught = _record(lambda: solve(
+        'pyscf_fci', coupled, 4, 4, spin_free=True, nroots=3, sides=sides,
+        delta_method='lowdin', out=out, **kwargs))
+    st = static_states('pyscf_fci', _request(h, 1))
+    first_pole = np.linalg.eigvalsh(PyscfFCISolver().sector_matrix(
+        st.h1, st.eri, 4, (1, 2)))[0] + min(sides[0][2])
+    return e, out, caught, first_pole
+
+
+@pytest.mark.parametrize('shift', [0.8, 1.0])
+def test_roots_above_the_lowest_pole_are_not_checked(h, shift):
+    """With a level moved down so that the first pole lies between the
+    ground state and the other roots, a returned root above the pole is
+    marked in out['crossing_unchecked'] (the count of solutions below it
+    is solutions minus poles below) and is not flagged
+    'delta_roots_missing'; the ground state, below the pole, is checked.
+    A near-pole root is unchecked too."""
+    e, out, caught, first_pole = _shifted(h, shift)
+    above = out['e_active'] > first_pole
+    print(f'shift {shift}: first pole {first_pole:.5f}, roots '
+          f'{np.round(out["e_active"], 5)}, near pole {out["near_pole"]}, '
+          f'solutions below {out["solutions_below"]}, unchecked '
+          f'{out["crossing_unchecked"]}')
+    assert above.tolist() == [False, True, True]
+    assert out['crossing_unchecked'].dtype == bool
+    assert np.array_equal(out['crossing_unchecked'],
+                          above | out['near_pole'])
+    assert not out['crossing_unchecked'][0]
+    # solutions_below of the roots above the pole is large (it counts the
+    # solutions below the pole too); no message names them
+    assert out['solutions_below'][1] > 0
+    said = [str(w.message) for w in caught
+            if 'solution(s) of the Delta' in str(w.message)]
+    assert said and all('returned root 0 ' in m for m in said), said
+    assert 'delta_roots_missing' in _names(out)
+    if shift == 0.8:
+        assert out['near_pole'].any() and out['crossing_unchecked'][
+            out['near_pole']].all()
+
+
+def test_per_root_flag_messages_name_the_static_state(h):
+    """'delta_near_pole', 'delta_satellite' and 'delta_linearization' name
+    the static state, and say that out['static_index'] maps static states
+    to returned roots (the returned order is the sorted one)."""
+    _, out, caught, _ = _shifted(h, 0.8)
+    texts = [str(w.message) for w in caught
+             if str(w.message).startswith('Delta (lowdin): ')
+             and ' state ' in str(w.message)[:40]]
+    assert texts
+    for text in texts:
+        assert 'static state ' in text and "out['static_index']" in text, text
+        assert not text.startswith('Delta (lowdin): state')
+
+
+def test_a_reused_out_loses_the_delta_keys(h):
+    """One dict given to a Delta solve and then to one without Delta keeps
+    none of the first solve's Delta-only entries."""
+    out = {}
+    _record(lambda: h.solve('pyscf_fci', nroots=2, out=out))
+    first = set(out)
+    assert {'static_index', 'solutions_below', 'near_pole',
+            'linearization_error'} <= first
+    _record(lambda: h.solve('pyscf_fci', nroots=2, delta_method=False,
+                            out=out))
+    assert set(out) == {'e0', 'e_active', 'spin_square', 'numerical_flags',
+                        'static', 'correction', 'z'}, sorted(out)
+    assert np.array_equal(out['static'], out['e_active'])
+    out = {}
+    _record(lambda: h.solve('pyscf_fci', nroots=2, out=out))
+    _record(lambda: h.solve('pyscf_fci', nroots=2, delta_method='static_mf',
+                            out=out))
+    for key in ('static_index', 'solutions_below', 'near_pole',
+                'crossing_unchecked', 'linearization_error',
+                'linearization_point', 'min_denominator', 'converged'):
+        assert key not in out, key
+
+
+#: energies of solves without sides taken from the code before Task 9
+#: (f8244a2; solvers/solve.py is the file of ebb53c7), written with
+#: float.hex(): the water CAS(4,4) on canonical orbitals through
+#: 'pyscf_fci', and a 4-site Hubbard ring (t = -1, U = 2, g_eff[0] = 0.5)
+PINNED = {
+    (1, None): ['-0x1.307cebea56a76p+6'],
+    (3, None): ['-0x1.307cebea56a76p+6', '-0x1.2f0c56752a470p+6',
+                '-0x1.2ef44d0c8ccebp+6'],
+    (1, 2): ['-0x1.2f0c56752a470p+6'],
+    (3, 2): ['-0x1.2f0c56752a470p+6', '-0x1.2ec6b15e9648ep+6',
+             '-0x1.2ea9937fe0a8bp+6'],
+}
+PINNED_HUBBARD = ['-0x1.2a09e667f3bbap+1', '-0x1.17c9cea19249ep+1',
+                  '-0x1.7ffffffffffccp+0']
+
+
+def test_solve_without_sides_is_bit_for_bit(canonical):
+    """Exact comparison (==) with energies computed by the code before
+    Task 9, where `static_states` did not exist: test_static_states_are_
+    today_s_solve compares `solve` with a function `solve` now calls."""
+    for (nroots, spin), want in PINNED.items():
+        e = solve('pyscf_fci', canonical.g_eff, 4, 4, spin_free=True,
+                  nroots=nroots, spin=spin)
+        assert all(a == float.fromhex(b) for a, b in zip(e, want)), (
+            nroots, spin)
+        assert len(e) == len(want)
+    t = np.zeros((4, 4))
+    for i in range(4):
+        t[i, (i + 1) % 4] = t[(i + 1) % 4, i] = -1.0
+    v = np.zeros((4,) * 4)
+    for i in range(4):
+        v[i, i, i, i] = 2.0
+    e = solve('pyscf_fci', {0: 0.5, 1: t, 2: v}, 4, 4, spin_free=True,
+              nroots=3)
+    assert len(e) == 3
+    assert all(a == float.fromhex(b) for a, b in zip(e, PINNED_HUBBARD))
+
+
 def test_spin_square_from_the_sector_operations():
     """`EnergyDependentSolver.spin_square`, which tells the states of the
     requested spin apart for extra['solutions_below'], from the engine's

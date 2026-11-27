@@ -493,10 +493,26 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     that are not degenerate partners, and 'delta_roots_missing' when more
     solutions of the Delta problem lie below a returned root than returned
     roots do (extra['solutions_below'] of the dynamic backend): a state the
-    static solve did not compute went below it, and asking for more roots
-    computes it. A root flagged 'delta_near_pole' is not checked for
-    missing states: next to a pole the count is not the number of states
-    below. Refused with sides: a delta_method outside DYNAMIC_METHODS
+    static solve did not compute went below it, and more roots are needed
+    to compute it (how many is not known in advance).
+    What 'delta_roots_missing' checks, and what silence means. The count
+    is the number of eigenvalues of H_eff(E_k) below the root's own
+    eigenvalue. It is the number of solutions below E_k only below the
+    lowest pole of the coupling, min(E_M + lambda) (E_M - lambda on the
+    hole side); above it the count is the solutions minus the poles below
+    E_k. So the check has three limits. (a) A root flagged
+    'delta_near_pole' is not checked: next to a pole the count is not the
+    number of states below. (b) A root above the lowest pole is not
+    checked, for the reason above; it can have states missing below it
+    with no flag. out['crossing_unchecked'], a boolean per returned root
+    in the returned order, is True for the roots of (a) and (b). (c) For a
+    'linearized' root flagged 'delta_linearization' the count is made, but
+    the root's energy is off by about its linearization error, and when
+    another root lies within that error the count can be wrong in either
+    direction (a flag too many or too few); use 'lowdin' there. Silence
+    therefore means: no missing state was found among the checked roots,
+    not that none is missing.
+    Refused with sides: a delta_method outside DYNAMIC_METHODS
     (ValueError; the static forms change h and are solved without sides),
     d_sa (ValueError: no dynamic method reads it before the remainder
     method), a spin-resolved g_eff and spin_free=False (NotImplementedError:
@@ -524,11 +540,13 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     orbital p and beta orbital p are one function. With sides, also, each
     per returned root and in the returned order: 'static' (the static
     energy, no constant), 'correction' (e_active - static), 'z',
-    'min_denominator', 'converged', 'static_index' and every entry of the
-    dynamic backend's `DeltaResult.extra` ('solutions_below', 'near_pole',
-    and for 'linearized' 'linearization_error' and 'linearization_point');
+    'min_denominator', 'converged', 'static_index', 'crossing_unchecked'
+    (above) and every entry of the dynamic backend's `DeltaResult.extra`
+    ('solutions_below', 'near_pole', 'above_pole', and for 'linearized'
+    'linearization_error' and 'linearization_point');
     an empty active space with sides reports static [0], correction [0],
-    z [1], min_denominator [inf], converged [True], static_index [0].
+    z [1], min_denominator [inf], converged [True], static_index [0],
+    crossing_unchecked [False].
     """
     if solver not in SOLVERS:
         raise ValueError(f"solver={solver!r} is not a backend of this driver; "
@@ -566,7 +584,8 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
                 out.update(static=np.array([0.0]), correction=np.array([0.0]),
                            z=np.array([1.0]), min_denominator=np.array([np.inf]),
                            converged=np.array([True]),
-                           static_index=np.array([0]))
+                           static_index=np.array([0]),
+                           crossing_unchecked=np.array([False]))
         return np.array([constant])
     if sides is not None:
         return _solve_with_delta(solver, request, sides, delta_method,
@@ -671,7 +690,7 @@ def _solve_with_delta(solver, r, sides, method, numerics, out):
         st.h1, st.eri, st.norb, st.sector, st.energies, st.vectors,
         spin=r.spin)
     order = np.argsort(res.energies, kind='stable')
-    _crossing_flags(res, order, method, numerics)
+    unchecked = _crossing_flags(res, order, method, numerics)
     e0 = r.g_eff.get(0, 0.0)
     e_active = res.energies[order]
     energies = e0 + e_active
@@ -680,7 +699,8 @@ def _solve_with_delta(solver, r, sides, method, numerics, out):
         out.update(e0=e0, e_active=e_active, static=static,
                    correction=e_active - static, z=res.z[order],
                    min_denominator=res.min_denominator[order],
-                   converged=res.converged[order], static_index=order)
+                   converged=res.converged[order], static_index=order,
+                   crossing_unchecked=unchecked)
         for key, value in res.extra.items():
             out[key] = np.asarray(value)[order]
         out['spin_square'] = [fci.spin_op.spin_square(
@@ -693,8 +713,11 @@ def _crossing_flags(res, order, method, numerics):
     (DeltaRootsCrossedWarning) of a refined result `res` sorted by `order`
     (`solve`, sides). Degenerate partners (one set of `degenerate_sets`)
     are one state for both: their order among themselves is not a crossing,
-    and none is below another. A root flagged 'delta_near_pole' is not
-    checked for missing states."""
+    and none is below another. A root flagged 'delta_near_pole' or above the
+    lowest pole (extra['above_pole']: there the count is the solutions minus
+    the poles below, not the solutions below) is not checked for missing
+    states. Returns `unchecked`, bool per returned root in the returned
+    order, True for those roots."""
     static, energies = res.static, res.energies
     n = len(static)
     sets = degenerate_sets(static, numerics)
@@ -717,8 +740,9 @@ def _crossing_flags(res, order, method, numerics):
              DeltaRootsCrossedWarning, stacklevel=5)
     margin = numerics_or_default(numerics).downfolding.delta_degenerate
     below = res.extra['solutions_below']
+    unchecked = (res.extra['near_pole'] | res.extra['above_pole'])[order]
     for position, k in enumerate(order):
-        if res.extra['near_pole'][k]:
+        if unchecked[position]:
             continue
         returned = np.count_nonzero((energies < energies[k] - margin)
                                     & (label != label[k]))
@@ -733,6 +757,7 @@ def _crossing_flags(res, order, method, numerics):
                  f"nroots = "
                  f"{n + missing}, more if those states come from higher "
                  f"static states.", DeltaRootsCrossedWarning, stacklevel=5)
+    return unchecked
 
 
 #: The backends that give the states of one total spin (`solve`'s spin).

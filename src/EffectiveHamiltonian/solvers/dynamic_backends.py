@@ -87,6 +87,11 @@ from src.Base.numerics.numerics import numerics_or_default
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
 from src.EffectiveHamiltonian.solvers.backends import sector_shape
 
+#: the sentence that ends the per-root Delta messages: k is the static order
+_STATIC_INDEX = (". The state number is that of the static solve; "
+                 "out['static_index'] of `solve` maps the static states to "
+                 "the returned roots, which are sorted ascending.")
+
 #: the dense methods and the number of dim(K)^2 matrices each holds
 DENSE_MATRICES = {'lowdin': 4, 'linearized': 6}
 
@@ -124,8 +129,12 @@ class DeltaRootsCrossedWarning(RuntimeWarning):
     maps each returned root to its static state. 'delta_roots_missing': more
     solutions of the Delta problem lie below a returned root than there are
     returned roots below it, so a state that the static solve did not
-    compute went below it; asking for more roots (nroots + 1 or more)
-    computes it."""
+    compute went below it; more roots are needed to compute it, and how
+    many is not known in advance (the missing state can come from a
+    static state far above the last one computed). The count is not made
+    for every root: out['crossing_unchecked'] marks the roots left out
+    (see `solvers.solve.solve`), and no flag does not mean that no state
+    is missing."""
 
 
 @dataclass(frozen=True)
@@ -146,7 +155,10 @@ class DeltaResult:
     delta_degenerate below the root's own eigenvalue: the solutions of the
     Delta problem below the root (module docstring), and
     extra['near_pole'] (nroots,) bool, True where the root was flagged
-    'delta_near_pole'. 'linearized' also reports
+    'delta_near_pole', and extra['above_pole'] (nroots,) bool, True where
+    the root lies above the lowest pole E_M + lam (hole side E_M - lam) of
+    any sector, a pole that couples, where the count is solutions minus
+    poles below. 'linearized' also reports
     extra['linearization_error'] (nroots,), its error estimate
     Z |<c|H_eff(E)|c> - E| in Ha, and extra['linearization_point']
     (nroots,), the E0 each root was linearized at."""
@@ -206,6 +218,15 @@ class _Sector:
         self.rows = np.flatnonzero(np.any(b != 0.0, axis=1))
         self.b = b[self.rows]
         self.resolution = resolution
+
+    def lowest_pole(self):
+        """The lowest pole E_M + lam (particle) or E_M - lam (hole) of this
+        sector over the levels that couple (a column of b that is not zero);
+        inf where nothing couples."""
+        used = np.any(self.b != 0.0, axis=0)
+        if len(self.rows) == 0 or not np.any(used):
+            return np.inf
+        return float((self.e_m.min() + (self.sign * self.lam[used]).min()))
 
     def denominators(self, energy):
         """E - E_M - lam (particle) or E - E_M + lam (hole), (dim M, n_lev)."""
@@ -326,7 +347,8 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics,
             lower = static < static[members].mean() - margin
             lower[members] = False
             below[members] = np.count_nonzero(lower)
-        extra = {'solutions_below': below, 'near_pole': np.zeros(n, bool)}
+        extra = {'solutions_below': below, 'near_pole': np.zeros(n, bool),
+                 'above_pole': np.zeros(n, bool)}
         if method == 'linearized':
             extra.update(linearization_error=np.zeros(n),
                          linearization_point=static.copy())
@@ -369,7 +391,9 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics,
                          for e, c in zip(out_e, out_c)])
     near = (smallest < settings.delta_pole_warn) | (
         point_distance < settings.delta_pole_warn)
-    extra = {'solutions_below': below, 'near_pole': near}
+    lowest = min(s.lowest_pole() for s in sectors)
+    extra = {'solutions_below': below, 'near_pole': near,
+             'above_pole': out_e > lowest}
     if method == 'linearized':
         # Z |<c|H_eff(E)|c> - E|: the residual of the root in the exact
         # H_eff(E), turned into an energy by the Newton step of Loewdin
@@ -384,24 +408,25 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics,
                  f'was linearized at {point[k]:.8f}, '
                  f'{point_distance[k]:.2e} Ha from a pole E_M -+ lam')
         flag('delta_near_pole',
-             f'Delta ({method}): state {k} at {out_e[k]:.8f} {where} (below '
+             f'Delta ({method}): static state {k} at {out_e[k]:.8f} {where} (below '
              f'delta_pole_warn = {settings.delta_pole_warn} Ha); the energy '
              f'is finite, but it moves fast with E there and may belong to '
-             f'the environment state', DeltaNearPoleWarning)
+             f'the environment state' + _STATIC_INDEX, DeltaNearPoleWarning)
     for k in np.flatnonzero(z < QP_WINDOW_Z_MIN):
         flag('delta_satellite',
-             f'Delta ({method}): state {k} at {out_e[k]:.8f} has Z = '
+             f'Delta ({method}): static state {k} at {out_e[k]:.8f} has Z = '
              f'{z[k]:.3f}, below {QP_WINDOW_Z_MIN}: it is mostly environment, '
-             f'a satellite, not a state of the active space', DeltaNearPoleWarning)
+             f'a satellite, not a state of the active space' + _STATIC_INDEX,
+             DeltaNearPoleWarning)
     for k in np.flatnonzero(extra.get('linearization_error', np.zeros(n))
                             > settings.delta_linearization_warn):
         flag('delta_linearization',
-             f'Delta (linearized): state {k} at {out_e[k]:.8f} has an '
+             f'Delta (linearized): static state {k} at {out_e[k]:.8f} has an '
              f'estimated linearization error of '
              f'{extra["linearization_error"][k]:.1e} Ha (Z |<c|H_eff(E)|c> - '
              f'E|), above delta_linearization_warn = '
              f'{settings.delta_linearization_warn} Ha; '
-             f"delta_method='lowdin' gives the exact value",
+             f"delta_method='lowdin' gives the exact value" + _STATIC_INDEX,
              DeltaLinearizationWarning)
     return DeltaResult(out_e, static, z, smallest,
                        [c.reshape(s) for c, s in zip(out_c, shapes)],

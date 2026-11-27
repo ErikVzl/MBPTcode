@@ -326,7 +326,23 @@ class DownfoldedHamiltonian:
         DeltaRootsCrossedWarning report it: 'delta_roots_reordered' when
         the order of the returned roots changed, and 'delta_roots_missing'
         when a state that the static solve did not compute went below a
-        returned root (ask for more roots).
+        returned root (more roots are needed to compute it; how many is
+        not known in advance). The second flag checks less than it says,
+        in three ways. It counts the eigenvalues of H_eff(E_k) below the
+        root's own, which is the number of solutions below E_k only below
+        the lowest pole of the coupling, min(E_M + lambda) (E_M - lambda
+        on the hole side); above it the count is the solutions minus the
+        poles below E_k. (a) A root flagged 'delta_near_pole' is not
+        checked. (b) A root above the lowest pole is not checked, and
+        can have missing states below it with no flag.
+        out['crossing_unchecked'], a boolean per returned root in the
+        returned order, is True for the roots of (a) and (b). (c) For a
+        'linearized' root flagged 'delta_linearization' the count is made,
+        but its energy is off by about the linearization error, and when
+        another root lies within that error the count can be wrong in
+        either direction; use 'lowdin' there. Silence means that no
+        missing state was found among the checked roots, not that none is
+        missing.
 
         out, a dict, receives what the solver function writes: out['e0'],
         the constant added, and out['e_active'], the E^A of each root, so
@@ -336,12 +352,17 @@ class DownfoldedHamiltonian:
         out['numerical_flags'], every flag of the call (those of Delta and
         'delta_off' and 'delta_static_mf' included); and with
         'linearized' or 'lowdin' the per-root 'static', 'correction',
-        'z', 'min_denominator', 'converged', 'static_index' and the
-        method's extra entries. For a record with a coupling, False and the
+        'z', 'min_denominator', 'converged', 'static_index',
+        'crossing_unchecked' and the method's extra entries. For a record with a coupling, False and the
         static forms also give 'static' = out['e_active'], 'correction'
         zero and 'z' one. E_0 for reporting is energies.e0, or out['e0']
         for the constant of one solve; E^A is out['e_active'], never a
         total minus a constant chosen by hand."""
+        if out is not None:
+            # a dict used for an earlier solve keeps none of its Delta
+            # entries: the solve below writes the ones it has
+            for key in DELTA_OUT_KEYS:
+                out.pop(key, None)
         supplied = sorted(k for k in ('sides', 'd_sa', 'numerics')
                           if k in kwargs)
         if supplied:
@@ -563,6 +584,15 @@ def _nothing_to_fold(delta_method):
             f'between its active and environment orbitals (canonical '
             f'orbitals, or built with delta=False), so there is nothing to '
             f'fold; solve it with delta_method=None or False.')
+
+
+#: the entries of `out` that only a Delta solve writes (`solve`), and the
+#: ones `_static_parts` writes without one: removed at the start of each
+#: record solve, so that a reused `out` holds the last solve alone
+DELTA_OUT_KEYS = (
+    'static', 'correction', 'z', 'min_denominator', 'converged',
+    'static_index', 'crossing_unchecked', 'solutions_below', 'near_pole',
+    'above_pole', 'linearization_error', 'linearization_point')
 
 
 def _static_parts(out):
