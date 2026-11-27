@@ -139,12 +139,9 @@ def test_degenerate_occupation_cut_is_refused(low, low_hf):
         build_effective_hamiltonian(low_hf, space)
 
 
-@pytest.mark.filterwarnings(
-    'ignore::src.EffectiveHamiltonian.Downfolding.hybridization.'
-    'DeltaOffWarning')
 def test_near_degenerate_cut_warns_and_runs(low):
-    # a rotated occupied block is refused with Delta on until Task 13: those
-    # spaces are built with delta=False
+    # with Delta on, the default, for both blocks: the occupied one is
+    # folded since Task 13
     nocc = low.nocc
     virt = no_space(low, 2, 2)
     occ = no_space(low, 2, 2, rotate_occupied=True)
@@ -156,25 +153,21 @@ def test_near_degenerate_cut_warns_and_runs(low):
                                     ('1.9589', '1.9601'))):
         with pytest.warns(NearDegenerateCutWarning,
                           match=f'{a}.*{b}'):
-            h = build_effective_hamiltonian(
-                low, space, screening='bare',
-                delta=not space.basis.rotates_occupied)
+            h = build_effective_hamiltonian(low, space, screening='bare')
         assert 'no_cut_near_degenerate' in _flags(h)
         assert np.isfinite(h.g_eff[0])
+        assert h.hybridization is not None
         # a smaller no_cut_warn lets the same cut through without a word
         quiet = Numerics(downfolding={'no_cut_warn': 1e-3})
         with warnings.catch_warnings():
             warnings.simplefilter('error', NearDegenerateCutWarning)
-            h = build_effective_hamiltonian(
-                low, space, screening='bare', numerics=quiet,
-                delta=not space.basis.rotates_occupied)
+            h = build_effective_hamiltonian(low, space, screening='bare',
+                                            numerics=quiet)
         assert 'no_cut_near_degenerate' not in _flags(h)
     for space in apart:
         with warnings.catch_warnings():
             warnings.simplefilter('error', NearDegenerateCutWarning)
-            h = build_effective_hamiltonian(
-                low, space, screening='bare',
-                delta=not space.basis.rotates_occupied)
+            h = build_effective_hamiltonian(low, space, screening='bare')
         assert 'no_cut_near_degenerate' not in _flags(h)
     assert Numerics().downfolding.no_cut_warn == DOWNFOLDING_NO_CUT_WARN
 

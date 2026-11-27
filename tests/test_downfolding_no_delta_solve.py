@@ -576,7 +576,7 @@ def test_static_mf_matches_its_formula_and_warns(h):
                                      + delta(t, u, w, True))
     print(f'static_mf against its formula: {np.abs(D - want).max():.1e}')
     assert np.abs(D - want).max() < 1e-12
-    assert c == 0.0                                     # no hole side yet
+    assert c == 0.0               # canonical occupied orbitals: no hole side
     # the constant of a hole side: -g tr(D_hole), g = 2
     rng = np.random.default_rng(2)
     b_hole = np.zeros((n, 3))

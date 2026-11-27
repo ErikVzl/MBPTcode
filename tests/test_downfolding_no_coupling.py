@@ -5,8 +5,8 @@ the rotated orbital energies in both blocks, the environment levels from the
 bare Fock operator, the norms of what is left out (Sigma_x - v_xc on a
 reference that is not HF), and the switch `delta` of
 `build_effective_hamiltonian`: on with a basis, nothing for canonical
-orbitals, `DeltaOffWarning` and its flag when it is turned off, and the
-refusal of a rotated occupied block until Task 13."""
+orbitals, `DeltaOffWarning` and its flag when it is turned off, and both
+blocks folded for a rotated occupied block (Task 13)."""
 import warnings
 from dataclasses import replace
 
@@ -100,8 +100,7 @@ def test_zero_for_canonical_orbitals(mfs, xc):
 
 @pytest.mark.parametrize('xc', ['hf', 'pbe'])
 def test_blocks_are_the_rotated_orbital_energies(mfs, lows, xc):
-    # the build refuses a rotated occupied block until Task 13: the function
-    # is called directly
+    # the function is called directly, on both blocks
     mf = mfs[xc]
     space = no_space(lows[xc], 2, 3, rotate_occupied=True)
     c, T = _coupling(mf, space)
@@ -125,10 +124,10 @@ def test_blocks_are_the_rotated_orbital_energies(mfs, lows, xc):
     assert min(c.norms.values()) > 1e-3
     # a block not asked for is zeroed; its norm is reported all the same
     only = fock_coupling(mf, mf.mo_coeff @ T, T, eps, space,
-                         blocks=DEFAULT_BLOCKS)
+                         blocks=('av_ev',))
     assert np.all(only.b_hole == 0.0)
     assert np.array_equal(only.b_particle, c.b_particle)
-    assert only.norms == c.norms and only.blocks == DEFAULT_BLOCKS
+    assert only.norms == c.norms and only.blocks == ('av_ev',)
     assert c.blocks == COUPLING_BLOCKS and c.n_act_occ == k
 
 
@@ -221,9 +220,10 @@ def test_on_with_a_basis_and_nothing_for_canonical(lows):
         assert np.array_equal(on.g_eff[k], off.g_eff[k])
     assert set(on.diagnostics) == set(off.diagnostics)
     # the test hook selects the blocks
-    both = build_effective_hamiltonian(low, space, screening='bare',
-                                       _blocks=COUPLING_BLOCKS)
-    assert both.hybridization.blocks == COUPLING_BLOCKS
+    assert DEFAULT_BLOCKS == COUPLING_BLOCKS
+    particle = build_effective_hamiltonian(low, space, screening='bare',
+                                           _blocks=('av_ev',))
+    assert particle.hybridization.blocks == ('av_ev',)
 
 
 def test_delta_false_is_flagged(lows):
@@ -236,11 +236,22 @@ def test_delta_false_is_flagged(lows):
     assert 'delta_off' in _flags(h)
 
 
-def test_rotated_occupied_block_waits_for_task_13(lows, low_hf):
+def test_rotated_occupied_block_folds_both_sides(mfs, lows, low_hf):
+    """A rotated occupied block with Delta on (refused before Task 13)
+    builds, for the RPA and the HF method: its coupling folds both blocks,
+    the hole block is the one `fock_coupling` gives, and sides() holds the
+    particle and the hole entry. delta=False still leaves it out."""
+    mf = mfs['hf']
     space = no_space(lows['hf'], 2, 2, rotate_occupied=True)
+    want, _ = _coupling(mf, space)
     for low in (lows['hf'], low_hf):
-        with pytest.raises(NotImplementedError, match='Task 13'):
-            build_effective_hamiltonian(low, space)
+        h = build_effective_hamiltonian(low, space)
+        c = h.hybridization
+        assert c.blocks == COUPLING_BLOCKS
+        assert np.abs(c.b_hole - want.b_hole).max() < 1e-12
+        assert np.abs(c.b_hole[:2]).max() > 1e-3
+        assert [kind for kind, _, _, _ in c.sides()] == ['particle', 'hole']
+        assert h.diagnostics['fock_coupling']['folded'] == c.norms
     with pytest.warns(DeltaOffWarning):
         h = build_effective_hamiltonian(low_hf, space, delta=False)
     assert h.hybridization is None

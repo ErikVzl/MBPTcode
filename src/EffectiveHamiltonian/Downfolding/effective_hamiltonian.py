@@ -193,10 +193,7 @@ def _require_delta_route(spaces, delta):
     """Refuse, with Delta on, an unrestricted reference with an orbital
     basis: Delta for two spin channels is not built, and a rotated basis
     without it is the static Hamiltonian only, which delta=False asks for
-    by name (NotImplementedError). Refuse, with Delta on, a space whose
-    occupied block is rotated: the E_0 term of the hybridization would hold
-    the hole side, which Delta does not fold yet (NotImplementedError,
-    Task 13)."""
+    by name (NotImplementedError)."""
     if delta and len(spaces) == 2 and any(s.basis is not None
                                           for s in spaces):
         raise NotImplementedError(
@@ -205,13 +202,6 @@ def _require_delta_route(spaces, delta):
             'coupling of two spin channels, is not built. delta=False gives '
             'the static Hamiltonian only (E_0, the one-body and the '
             'two-body part), without the coupling the rotation creates.')
-    if delta and any(s.basis is not None and s.basis.rotates_occupied
-                     for s in spaces):
-        raise NotImplementedError(
-            'an active space whose occupied block is rotated '
-            '(rotate_occupied=True) with Delta on: the hole side of Delta '
-            'is not built yet (Task 13). delta=False gives the static '
-            'Hamiltonian only.')
 
 
 #: the options of the DMRG static solve that `prepare_delta` passes on
@@ -719,22 +709,28 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     block, 'left_out': the norms of what Delta does not fold, Sigma_x - v_xc
     on a reference that is not HF}. delta=False leaves it out: the result
     is the static Hamiltonian only, with DeltaOffWarning and the flag
-    'delta_off'. Until Task 13 a space whose occupied block is rotated is
-    refused with Delta on (NotImplementedError). An unrestricted reference
-    with a basis is refused with Delta on, the default
-    (NotImplementedError): Delta for two spin channels is not built, so
-    the static Hamiltonian it gives with delta=False has to be asked for by
-    name. For canonical orbitals the coupling is identically zero: nothing
-    is built, hybridization is None and there is no 'fock_coupling' entry,
-    whatever `delta` is. _blocks
+    'delta_off'. The coupling holds both blocks the rotation creates
+    (DEFAULT_BLOCKS): active virtual - environment virtual (the particle
+    side) and, for a rotated occupied block (rotate_occupied=True), active
+    occupied - inactive occupied (the hole side); for canonical occupied
+    orbitals the hole block is exactly zero and gives no side
+    (`Coupling.sides`). An unrestricted reference with a basis is refused
+    with Delta on, the default (NotImplementedError): Delta for two spin
+    channels is not built, so the static Hamiltonian it gives with
+    delta=False has to be asked for by name. For canonical orbitals the
+    coupling is identically zero: nothing is built, hybridization is None
+    and there is no 'fock_coupling' entry, whatever `delta` is. _blocks
     (tests only) replaces DEFAULT_BLOCKS, the blocks the coupling folds.
     Exactly when the coupling is built the method's `downfold` gets
     hybridization=True and E_0 gains its one Delta term,
     energies.e_c_hybridization = E_c^{A,Delta} - E_c^A (method 'rpa';
     0.0 for 'hf'): energies.e0 holds it, energies.e0_without_delta and
-    g_eff[0] do not (zero_body.py). Without a coupling the term is 0.0,
-    not computed, and the three are one number. `hybridization` itself is
-    not an option here (TypeError): it follows from `delta` and the basis.
+    g_eff[0] do not (zero_body.py). E_c^{A,Delta} dresses the active
+    orbitals with every canonical orbital of their own space, occupied and
+    virtual, so it contains both blocks of the coupling, the blocks Delta
+    folds (spec 6b). Without a coupling the term is 0.0, not computed, and
+    the three are one number. `hybridization` itself is not an option here
+    (TypeError): it follows from `delta` and the basis.
 
     `numerical_flags` lists every named flag behind this
     Hamiltonian (src.Base.numerical_flags): those of the low-level run

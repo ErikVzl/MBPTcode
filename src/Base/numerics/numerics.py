@@ -580,10 +580,14 @@ class DownfoldingNumerics:
     root closer to a pole is evaluated at that distance, finite. Their
     memory limit is layout.delta_dense_gb. delta_occupation_floor: the
     static form 'static_sa' (`Downfolding.hybridization.state_averaged_delta`)
-    drops a direction of the state-averaged occupation gamma of the active
-    virtual orbitals whose occupation is below this (default
-    DOWNFOLDING_DELTA_OCCUPATION_FLOOR): no state of the average removes an
-    electron from it, so it has no removal energy and D_SA is zero along it.
+    drops a direction of a state-averaged occupation gamma whose occupation
+    is not above this (default DOWNFOLDING_DELTA_OCCUPATION_FLOOR): on the
+    particle side gamma is the occupation of the active virtual orbitals, and
+    no state of the average removes an electron from such a direction, so it
+    has no removal energy; on the hole side gamma is the occupation of the
+    holes of the active occupied orbitals, g - dm1, and no state adds an
+    electron to such a direction, so it has no attachment energy. D_SA is
+    zero along a dropped direction.
 
     Refused when built: srg_s that is not a finite positive number or None,
     a negative pole_margin, continuation_margin, no_cut_warn,
