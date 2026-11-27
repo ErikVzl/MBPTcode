@@ -269,7 +269,7 @@ def test_record_takes_its_coupling_and_numerics_itself(h):
             h.solve('pyscf_fci', **{key: value})
     with pytest.raises(ValueError, match='linearized'):
         h.solve('pyscf_fci', delta_method='exact')
-    with pytest.raises(NotImplementedError, match='Task 11'):
+    with pytest.raises(ValueError, match='prepare_delta'):
         h.solve('pyscf_fci', delta_method='sa_remainder')
     assert set(DELTA_METHODS) == {'linearized', 'lowdin', 'sa_remainder',
                                   'static_sa', 'static_mf'}

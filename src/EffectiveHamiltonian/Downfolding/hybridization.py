@@ -116,7 +116,8 @@ class Coupling:
     d_sa: None, or (D, c), the static form 'static_sa' of Delta
         (`state_averaged_delta`): D (n_act, n_act) is added to h and c to the
         constant. Set by `DownfoldedHamiltonian.prepare_delta`, which
-        returns a copy of the record with it.
+        returns a copy of the record with it. The remainder method
+        'sa_remainder' reads it too: its static states are those of h + D.
     """
     b_particle: np.ndarray
     lam_virtual: np.ndarray

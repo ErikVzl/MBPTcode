@@ -92,6 +92,7 @@ pytest test_downfolding_no_two_channels.py
 pytest test_downfolding_no_delta_dense.py
 pytest test_downfolding_no_delta_solve.py
 pytest test_downfolding_no_lanczos.py
+pytest test_downfolding_no_remainder.py
 pytest test_downfolding_no_hole.py
 pytest test_downfolding_no_hybrid_reference.py
 pytest test_downfolding_qp.py

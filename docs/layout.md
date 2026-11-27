@@ -135,7 +135,8 @@ src/EffectiveHamiltonian/
                                coupled cluster), dynamic_backends.py (the
                                dynamic backends, which refine the states of
                                a static one with Delta: exact and
-                               linearized Loewdin on the FCI engine, and
+                               linearized Loewdin on the FCI engine, the
+                               remainder method on the static D_SA, and
                                the removal and attachment Green's
                                functions of a CI state by block Lanczos),
                                determinants.py

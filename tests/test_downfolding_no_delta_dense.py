@@ -39,9 +39,9 @@ from src.EffectiveHamiltonian.solvers.backends import (
     Block2DMRGSolver, CoupledClusterSolver, ExactDiagonalizationSolver,
     PyscfFCISolver, PyscfSpinResolvedFCISolver)
 from src.EffectiveHamiltonian.solvers.dynamic_backends import (
-    DYNAMIC_METHODS, DeltaLinearizationWarning, DeltaNearPoleWarning,
-    DeltaNotConverged, LinearizedLowdinSolver, LowdinSolver, delta_roots,
-    dense_memory_gb, dense_memory_limit_gb)
+    DENSE_MATRICES, DYNAMIC_METHODS, DeltaLinearizationWarning,
+    DeltaNearPoleWarning, DeltaNotConverged, LinearizedLowdinSolver,
+    LowdinSolver, delta_roots, dense_memory_gb, dense_memory_limit_gb)
 from tests.no_downfolding import nitrogen, no_space, pq_spectrum, water
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -95,7 +95,7 @@ def solved(case):
     """{method: (result, flags, warnings)} of the water states."""
     h1, eri, sides, engine, E, V = case
     return {m: _refine(m, engine, sides, h1, eri, 4, (2, 2), E, V)
-            for m in DYNAMIC_METHODS}
+            for m in DENSE_MATRICES}
 
 
 @pytest.fixture(scope='module')
@@ -259,7 +259,7 @@ def test_linearized_follows_lowdin_on_n2(n2):
 def test_zero_coupling_is_the_static_spectrum(case):
     h1, eri, sides, engine, E, V = case
     zero = [(k, s, lam, np.zeros_like(b)) for k, s, lam, b in sides]
-    for cls in DYNAMIC_METHODS.values():
+    for cls in (DYNAMIC_METHODS[m] for m in DENSE_MATRICES):
         res = cls(engine, zero).refine(h1, eri, 4, (2, 2), E, V)
         assert np.abs(res.energies - E).max() < 1e-12
         assert np.all(res.z == 1.0)
@@ -299,7 +299,7 @@ def _state(text):
     return int(text.split('state ')[1].split()[0])
 
 
-@pytest.mark.parametrize('method', sorted(DYNAMIC_METHODS))
+@pytest.mark.parametrize('method', sorted(DENSE_MATRICES))
 def test_near_pole_is_flagged_not_nan(case, method):
     """The pole (M, e) the ground state weighs most (alpha sector (1, 2))
     moved to 0.005 Ha below the static ground state: a finite result and
@@ -326,7 +326,7 @@ def test_near_pole_is_flagged_not_nan(case, method):
         assert np.all(np.isfinite(c))
 
 
-@pytest.mark.parametrize('method', sorted(DYNAMIC_METHODS))
+@pytest.mark.parametrize('method', sorted(DENSE_MATRICES))
 def test_a_root_on_a_pole_is_finite(case, method):
     """The same pole moved exactly onto the static ground state, where the
     first step evaluates Delta: E_K - E_M - lam = 0 in floating point, with
@@ -364,7 +364,7 @@ def test_no_active_virtual_means_no_delta(low):
     h1, eri = _integrals(h)
     engine = PyscfFCISolver()
     E, V = engine.roots(h1, eri, 2, (2, 2), nroots=1, spin=None)
-    for cls in DYNAMIC_METHODS.values():
+    for cls in (DYNAMIC_METHODS[m] for m in DENSE_MATRICES):
         res = cls(engine, h.hybridization.sides()).refine(h1, eri, 2, (2, 2),
                                                           E, V)
         assert np.array_equal(res.energies, E) and np.all(res.z == 1.0)
@@ -415,7 +415,7 @@ def test_columns_of_b_pair_with_their_levels():
 
 
 # ------------------------------------------------------- degenerate states
-@pytest.mark.parametrize('method', sorted(DYNAMIC_METHODS))
+@pytest.mark.parametrize('method', sorted(DENSE_MATRICES))
 def test_degenerate_partners(n2, method):
     """The pairs of degenerate states among the lowest eight of N2 CAS(6,6)
     at (3, 3): one energy, 1e-8 Ha, and two different states. The overlap is
@@ -559,7 +559,7 @@ class _Untouched(PyscfFCISolver):
 def test_too_large_is_refused(case):
     h1, eri, sides, _, E, V = case
     tiny = Numerics(layout={'delta_dense_gb': 1e-6})
-    for cls in DYNAMIC_METHODS.values():
+    for cls in (DYNAMIC_METHODS[m] for m in DENSE_MATRICES):
         with pytest.raises(ValueError, match='sa_remainder') as err:
             cls(_Untouched(), sides, tiny).refine(h1, eri, 4, (2, 2), E, V)
         assert 'delta_dense_gb' in str(err.value)

@@ -281,11 +281,16 @@ class DownfoldedHamiltonian:
         | coupling, False | g_eff | (h, v) | e0_without_delta (= g_eff[0]); flag 'delta_off' |
         | coupling, 'static_mf' or 'static_sa' | {0: e0 + c, 1: h + D, 2: v} | (h + D, v) | e0 + c |
         | coupling, None/'linearized' or 'lowdin' | {0: e0, 1: h, 2: v} with the coupling | the static states of (h, v) refined with Delta | e0 |
+        | coupling, 'sa_remainder' | {0: e0, 1: h, 2: v} with the coupling and D_SA = (D, c) | the static states of (h + D, v), their energies plus c, refined by the remainder | e0 |
 
         e0 is energies.e0, h and v are g_eff[1] and g_eff[2], and (D, c)
         the static form: D a one-body matrix added to h and c the constant
         of its hole part (zero without a hole side). No path adds g_eff[0]
-        to an energy with Delta, and none adds e0 to one without.
+        to an energy with Delta, and none adds e0 to one without. With
+        'sa_remainder' the constant c of D_SA is part of E^A: it is in the
+        static energy of each state (out['static']), the remainder takes the
+        whole of D_SA out again, c included, and the constant added is e0,
+        as for the other dynamic methods.
 
         - 'linearized' (the default): linearized Loewdin, one generalized
           eigenproblem per state (LinearizedLowdinSolver). It flags a state
@@ -298,14 +303,34 @@ class DownfoldedHamiltonian:
           'delta_static_mf' on every use; any solver.
         - 'static_sa': D_SA (`state_averaged_delta`), built beforehand by
           `prepare_delta` and refused (ValueError) without it; any solver.
-        - 'sa_remainder': not built yet (NotImplementedError, Task 11).
+        - 'sa_remainder': the remainder method (RemainderSolver), the one
+          for active spaces beyond the memory limit of the dense methods.
+          It needs D_SA, built beforehand by `prepare_delta` (ValueError
+          naming prepare_delta without it), from the states that will be
+          solved: D_SA is in the static Hamiltonian, and each state K of
+          h + D, at its energy E_K (eigenvalue plus c), gets one scalar
+          correction, the expectation value of what D_SA leaves out,
+          r_K = <K|Delta(E_K)|K> - (tr(D dm1_K) + c), Z-renormalized:
+          E_K + r_K / (1 - r'_K). Delta is taken from the removal and
+          attachment Green's functions of K by block Lanczos, at
+          numerics.downfolding.delta_lanczos_depth blocks. The state vector
+          is that of h + D and is not relaxed further, so it is first order
+          in Delta - D_SA: close to 'lowdin' where D_SA represents Delta
+          well at each state's energy (weak coupling, Z near 1), and not
+          where it does not, for instance when a declared state lies close
+          to a pole of Delta, which distorts D_SA for every state; compare
+          with 'lowdin' on a smaller active space. out['lanczos_change']
+          reports the change of each correction from one Lanczos block
+          less.
         - False: no Delta, with DeltaOffWarning and the flag 'delta_off'
           when the record has a coupling.
 
-        The two dynamic methods run on the solvers whose backend has sector
-        operations ('pyscf_fci'); any other solver is refused before
-        anything is solved, naming the static forms. A record without a
-        coupling takes None or False and refuses a named method
+        The three dynamic methods ('linearized', 'lowdin', 'sa_remainder')
+        run on the solvers whose backend has sector operations
+        ('pyscf_fci'), whatever backend built D_SA; any other solver is
+        refused before anything is solved, naming the static forms. A
+        record without a coupling takes None or False and refuses a named
+        method
         (ValueError: there is nothing to fold). A record with a coupling
         built with spin_free=False refuses every method but False
         (NotImplementedError: the coupling is spatial).
@@ -318,7 +343,7 @@ class DownfoldedHamiltonian:
         when a state that the static solve did not compute went below a
         returned root (more roots are needed to compute it; how many is
         not known in advance). The second flag checks less than it says,
-        in three ways. It counts the eigenvalues of H_eff(E_k) below the
+        in four ways. It counts the eigenvalues of H_eff(E_k) below the
         root's own, which is the number of solutions below E_k only below
         the lowest pole of the coupling, min(E_M + lambda) (E_M - lambda
         on the hole side); above it the count is the solutions minus the
@@ -330,9 +355,13 @@ class DownfoldedHamiltonian:
         'linearized' root flagged 'delta_linearization' the count is made,
         but its energy is off by about the linearization error, and when
         another root lies within that error the count can be wrong in
-        either direction; use 'lowdin' there. Silence means that no
-        missing state was found among the checked roots, not that none is
-        missing.
+        either direction; use 'lowdin' there. (d) 'sa_remainder' does not
+        form H_eff(E) as a matrix, so it makes no count at all: every one
+        of its roots is unchecked (out['crossing_unchecked'] True), and
+        'delta_roots_missing' is never raised for it; solve with 'lowdin'
+        or 'linearized' on an active space they can hold to look for
+        missing states. Silence means that no missing state was found
+        among the checked roots, not that none is missing.
 
         out, a dict, receives what the solver function writes: out['e0'],
         the constant added, and out['e_active'], the E^A of each root, so
@@ -341,9 +370,11 @@ class DownfoldedHamiltonian:
         unrestricted reference from the record's spin_overlap);
         out['numerical_flags'], every flag of the call (those of Delta and
         'delta_off' and 'delta_static_mf' included); and with
-        'linearized' or 'lowdin' the per-root 'static', 'correction',
-        'z', 'min_denominator', 'converged', 'static_index',
-        'crossing_unchecked' and the method's extra entries. For a record with a coupling, False and the
+        'linearized', 'lowdin' or 'sa_remainder' the per-root 'static',
+        'correction', 'z', 'min_denominator', 'converged', 'static_index',
+        'crossing_unchecked' and the method's extra entries ('sa_remainder':
+        'near_pole' and 'lanczos_change'; no 'solutions_below'). For a
+        record with a coupling, False and the
         static forms also give 'static' = out['e_active'], 'correction'
         zero and 'z' one. E_0 for reporting is energies.e0, or out['e0']
         for the constant of one solve; E^A is out['e_active'], never a
@@ -379,6 +410,13 @@ class DownfoldedHamiltonian:
             _static_parts(out)
             return energies
         coupled = {0: self.energies.e0, 1: self.g_eff[1], 2: self.g_eff[2]}
+        if method == 'sa_remainder':
+            if self.hybridization.d_sa is None:
+                raise ValueError(
+                    "delta_method='sa_remainder' needs D_SA, built once from "
+                    "a declared set of states: h = h.prepare_delta(((nroots, "
+                    "spin), ...)) first, declaring the states to be solved.")
+            kwargs = dict(kwargs, d_sa=self.hybridization.d_sa)
         return self._solve(solver, coupled, out, dict(
             kwargs, sides=self.hybridization.sides(), delta_method=method,
             numerics=self.numerics))
@@ -419,7 +457,10 @@ class DownfoldedHamiltonian:
         """A copy of this record whose hybridization.d_sa is D_SA, the
         static form 'static_sa' of Delta (`state_averaged_delta`), built
         from a declared set of states that enter with equal weight; solve
-        it with h.solve(solver, delta_method='static_sa').
+        it with h.solve(solver, delta_method='static_sa'), or with
+        h.solve('pyscf_fci', delta_method='sa_remainder'), which also takes
+        D_SA from here (declare the states that will be solved: D_SA is
+        built from them and is in the static Hamiltonian of both).
 
         states: ((n, spin), ...), each pair the number of states and the
         spin of one request as `solve` takes them (spin None: the lowest n
@@ -482,18 +523,13 @@ class DownfoldedHamiltonian:
     def _method(self, delta_method):
         """The Delta method of a record with a coupling: None is
         'linearized'; an unknown name is refused (ValueError), every method
-        on a spin_free=False record (NotImplementedError), 'sa_remainder'
-        until it is built (NotImplementedError)."""
+        on a spin_free=False record (NotImplementedError)."""
         method = 'linearized' if delta_method is None else delta_method
         if isinstance(method, bool) or method not in DELTA_METHODS:
             raise ValueError(
                 f'delta_method={delta_method!r}: one of {DELTA_METHODS}, '
                 f"None (= 'linearized') or False (no Delta).")
         self._require_spin_free()
-        if method == 'sa_remainder':
-            raise NotImplementedError(
-                "delta_method='sa_remainder', the remainder method, is not "
-                "built yet (Task 11).")
         return method
 
     def _require_spin_free(self):
@@ -582,7 +618,8 @@ def _nothing_to_fold(delta_method):
 DELTA_OUT_KEYS = (
     'static', 'correction', 'z', 'min_denominator', 'converged',
     'static_index', 'crossing_unchecked', 'solutions_below', 'near_pole',
-    'above_pole', 'linearization_error', 'linearization_point')
+    'above_pole', 'linearization_error', 'linearization_point',
+    'lanczos_change')
 
 
 def _static_parts(out):

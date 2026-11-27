@@ -483,8 +483,17 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     path with nothing folded: the static energies, Z = 1. With sides the
     static states of the request are found as without them
     (`static_states`), refined by the dynamic backend
-    DYNAMIC_METHODS[delta_method] ('linearized' or 'lowdin';
-    solvers/dynamic_backends.py), and g_eff[0] is added. The energies are
+    DYNAMIC_METHODS[delta_method] ('linearized', 'lowdin' or
+    'sa_remainder'; solvers/dynamic_backends.py), and g_eff[0] is added.
+    'sa_remainder' takes d_sa = (D, c), the static D_SA of
+    `DownfoldedHamiltonian.prepare_delta`, and is refused (ValueError,
+    naming prepare_delta) without it: its static states are those of
+    {0: g_eff[0], 1: h + D, 2: v}, c is added to their energies (the
+    static energies E_K that out['static'] reports), and the backend
+    refines them with h, WITHOUT D, by the per-state remainder
+    <K|Delta(E_K)|K> - (tr(D dm1_K) + c), Z-renormalized
+    (`RemainderSolver`). g_eff[0] is added last, as for every method, so
+    with 'sa_remainder' c is part of out['e_active']. The energies are
     returned ascending: Delta can move two roots past each other, so the
     refined roots are sorted, and out['static_index'] gives for each
     returned root the static state it came from. Two flags of
@@ -500,7 +509,7 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     eigenvalue. It is the number of solutions below E_k only below the
     lowest pole of the coupling, min(E_M + lambda) (E_M - lambda on the
     hole side); above it the count is the solutions minus the poles below
-    E_k. So the check has three limits. (a) A root flagged
+    E_k. So the check has four limits. (a) A root flagged
     'delta_near_pole' is not checked: next to a pole the count is not the
     number of states below. (b) A root above the lowest pole is not
     checked, for the reason above; it can have states missing below it
@@ -509,17 +518,24 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     'linearized' root flagged 'delta_linearization' the count is made, but
     the root's energy is off by about its linearization error, and when
     another root lies within that error the count can be wrong in either
-    direction (a flag too many or too few); use 'lowdin' there. Silence
-    therefore means: no missing state was found among the checked roots,
-    not that none is missing.
+    direction (a flag too many or too few); use 'lowdin' there. (d)
+    'sa_remainder' refines each state by a scalar and never forms H_eff(E)
+    as a matrix, so it counts nothing (its DeltaResult has no
+    'solutions_below'): every root it returns is unchecked
+    (out['crossing_unchecked'] True) and 'delta_roots_missing' is never
+    raised for it, while 'delta_roots_reordered' is. Silence therefore
+    means: no missing state was found among the checked roots, not that
+    none is missing.
     Refused with sides: a delta_method outside DYNAMIC_METHODS
     (ValueError; the static forms change h and are solved without sides),
-    d_sa (ValueError: no dynamic method reads it before the remainder
-    method), a spin-resolved g_eff and spin_free=False (NotImplementedError:
+    d_sa with any method but 'sa_remainder' (ValueError: no other method
+    reads it), 'sa_remainder' without d_sa (ValueError), a spin-resolved
+    g_eff and spin_free=False (NotImplementedError:
     the coupling is spatial and Delta for two spin channels is not built),
     and a solver whose backend has no sector operations (ValueError naming
-    the static forms 'static_sa' and 'static_mf'), all before anything is
-    solved. numerics: a `Numerics` for the dynamic backend (None: the
+    the static forms 'static_sa' and 'static_mf'; 'sa_remainder' too needs
+    them at solve time, whatever backend built D_SA), all before anything
+    is solved. numerics: a `Numerics` for the dynamic backend (None: the
     defaults), read only with sides.
 
     out: a dict, filled with what was computed; the energies do not change
@@ -539,11 +555,13 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     no <S^2> is reported, since pyscf's own value assumes that alpha
     orbital p and beta orbital p are one function. With sides, also, each
     per returned root and in the returned order: 'static' (the static
-    energy, no constant), 'correction' (e_active - static), 'z',
+    energy, without g_eff[0]; with 'sa_remainder' it includes c),
+    'correction' (e_active - static), 'z',
     'min_denominator', 'converged', 'static_index', 'crossing_unchecked'
     (above) and every entry of the dynamic backend's `DeltaResult.extra`
     ('solutions_below', 'near_pole', 'above_pole', and for 'linearized'
-    'linearization_error' and 'linearization_point');
+    'linearization_error' and 'linearization_point'; for 'sa_remainder'
+    'near_pole' and 'lanczos_change' alone);
     an empty active space with sides reports static [0], correction [0],
     z [1], min_denominator [inf], converged [True], static_index [0],
     crossing_unchecked [False].
@@ -589,7 +607,7 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
         return np.array([constant])
     if sides is not None:
         return _solve_with_delta(solver, request, sides, delta_method,
-                                 numerics, out)
+                                 d_sa, numerics, out)
     if resolved:
         if solver == 'openfermion':
             raise ValueError(
@@ -655,11 +673,17 @@ def _require_delta(solver, g_eff, spin_free, delta_method, d_sa):
             f"dynamic backend, one of {tuple(DYNAMIC_METHODS)}. The static "
             f"forms 'static_sa' and 'static_mf' change h and are solved "
             f"without sides (DownfoldedHamiltonian.solve builds them).")
-    if d_sa is not None:
+    if delta_method == 'sa_remainder' and d_sa is None:
         raise ValueError(
-            "d_sa, the static D_SA, is read by the remainder method "
-            "'sa_remainder' alone, which is not built yet (Task 11): no "
-            "dynamic backend reads it.")
+            "delta_method='sa_remainder' needs d_sa = (D, c), the static "
+            "D_SA built once from a declared set of states "
+            "(DownfoldedHamiltonian.prepare_delta, which its solve passes "
+            "on); the dense methods 'linearized' and 'lowdin' need none.")
+    if delta_method != 'sa_remainder' and d_sa is not None:
+        raise ValueError(
+            f"d_sa, the static D_SA, is read by the remainder method "
+            f"'sa_remainder' alone; delta_method={delta_method!r} does not "
+            f"take it.")
     if _spin_resolved(g_eff):
         raise NotImplementedError(
             'Delta on a spin-resolved g_eff (the per-spin blocks of an '
@@ -681,14 +705,26 @@ def _require_delta(solver, g_eff, spin_free, delta_method, d_sa):
             f"'static_mf', which changes h and runs with any solver.")
 
 
-def _solve_with_delta(solver, r, sides, method, numerics, out):
+def _solve_with_delta(solver, r, sides, method, d_sa, numerics, out):
     """The energies of request `r` with Delta (`solve`, sides): the static
     states refined by DYNAMIC_METHODS[method], sorted ascending, the
-    crossing flags raised, g_eff[0] added; `out` filled."""
-    st = static_states(solver, r)
-    res = DYNAMIC_METHODS[method](st.engine, sides, numerics).refine(
-        st.h1, st.eri, st.norb, st.sector, st.energies, st.vectors,
-        spin=r.spin)
+    crossing flags raised, g_eff[0] added; `out` filled. With d_sa = (D, c)
+    ('sa_remainder') the static states are those of h + D, c is added to
+    their energies, and the backend refines them with h, without D."""
+    if d_sa is None:
+        st = static_states(solver, r)
+        res = DYNAMIC_METHODS[method](st.engine, sides, numerics).refine(
+            st.h1, st.eri, st.norb, st.sector, st.energies, st.vectors,
+            spin=r.spin)
+    else:
+        d, c = d_sa
+        h1 = r.spatial(solver)[0]
+        st = static_states(solver, replace(
+            r, g_eff={**r.g_eff, 1: r.g_eff[1] + np.asarray(d)}))
+        res = DYNAMIC_METHODS[method](st.engine, sides, numerics,
+                                      d_sa=d_sa).refine(
+            h1, st.eri, st.norb, st.sector, st.energies + float(c),
+            st.vectors, spin=r.spin)
     order = np.argsort(res.energies, kind='stable')
     unchecked = _crossing_flags(res, order, method, numerics)
     e0 = r.g_eff.get(0, 0.0)
@@ -716,8 +752,10 @@ def _crossing_flags(res, order, method, numerics):
     and none is below another. A root flagged 'delta_near_pole' or above the
     lowest pole (extra['above_pole']: there the count is the solutions minus
     the poles below, not the solutions below) is not checked for missing
-    states. Returns `unchecked`, bool per returned root in the returned
-    order, True for those roots."""
+    states. A result without extra['solutions_below'] (a method that
+    counts no solutions, 'sa_remainder') has every root unchecked. Returns
+    `unchecked`, bool per returned root in the returned order, True for
+    those roots."""
     static, energies = res.static, res.energies
     n = len(static)
     sets = degenerate_sets(static, numerics)
@@ -738,6 +776,10 @@ def _crossing_flags(res, order, method, numerics):
              f"returned in ascending order, and out['static_index'] gives "
              f"the static state of each returned root.",
              DeltaRootsCrossedWarning, stacklevel=5)
+    if 'solutions_below' not in res.extra:
+        # a method that counts no solutions ('sa_remainder'): no root is
+        # checked
+        return np.ones(n, dtype=bool)
     margin = numerics_or_default(numerics).downfolding.delta_degenerate
     below = res.extra['solutions_below']
     unchecked = (res.extra['near_pole'] | res.extra['above_pole'])[order]

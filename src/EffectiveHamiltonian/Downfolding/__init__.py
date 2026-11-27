@@ -44,11 +44,13 @@ build_effective_hamiltonian(low, active_space, spin_free, delta,
                 (srg_s, pole_margin, continuation_margin) replaces the run's
 
 h.solve(solver, delta_method, out, **solve options)
-    delta_method None (= 'linearized') | 'lowdin' | 'static_sa' |
-                'static_mf' | False: with a coupling on the record (a
-                rotated basis), Delta by linearized | exact Loewdin | the
-                static form D_SA (after h.prepare_delta(states)) | at the
-                mean-field energies | no Delta ('delta_off'); without a
+    delta_method None (= 'linearized') | 'lowdin' | 'sa_remainder' |
+                'static_sa' | 'static_mf' | False: with a coupling on the
+                record (a rotated basis), Delta by linearized | exact
+                Loewdin | D_SA plus a per-state remainder by block Lanczos
+                (after h.prepare_delta(states)) | the static form D_SA
+                (after h.prepare_delta(states)) | at the mean-field
+                energies | no Delta ('delta_off'); without a
                 coupling, None or False only. Each total is the active
                 energy of one model plus that model's constant: out['e0'],
                 out['e_active'] (DownfoldedHamiltonian.solve)

@@ -82,6 +82,20 @@ Its depth is numerics.downfolding.delta_lanczos_depth blocks; a start
 vector with a norm below numerics.downfolding.delta_rank_tol is taken as
 zero, and a start or Krylov direction whose part outside the directions
 kept before it has a norm below delta_rank_tol is dropped.
+
+The third method, 'sa_remainder' (`RemainderSolver`), needs no sector
+spectrum and is not dense: the states are those of h + D_SA, the static
+form of Delta built beforehand from a declared set of states, and each
+gets one scalar, the expectation value of what D_SA leaves out,
+r_K(E) = <K|Delta(E)|K> - (tr(D dm1_K) + c), from those Green's functions
+by Lanczos, as one Z-renormalized step E_K + r_K / (1 - r'_K). It is first
+order in Delta - D_SA and does not relax the states: its accuracy is that
+of D_SA near each state's energy. It flags 'delta_near_pole' and
+'delta_satellite' as the dense methods do, reports in
+extra['lanczos_change'] the change of each correction from one Lanczos
+block less, and counts no solutions below a root (it forms no H_eff(E)),
+so `solvers.solve.solve` leaves all its roots unchecked for missing
+states.
 """
 import math
 from dataclasses import dataclass, field
@@ -110,8 +124,10 @@ DENSE_MATRICES = {'lowdin': 4, 'linearized': 6}
 class DeltaNearPoleWarning(RuntimeWarning):
     """A root of a Delta solve next to a pole, two flags.
     'delta_near_pole': its smallest denominator |E - E_M -+ lam| over the
-    poles it sees, or for 'linearized' that of its linearization point E0,
-    is below numerics.downfolding.delta_pole_warn; the energy is finite, but
+    poles it sees, or for 'linearized' that of its linearization point E0
+    (for 'sa_remainder' the poles are those of Lanczos, also at the static
+    energy E_K where the remainder was taken), is below
+    numerics.downfolding.delta_pole_warn; the energy is finite, but
     it moves fast with E there, and the root may belong to the environment
     state rather than to the active one. 'delta_satellite': its Z is below
     QP_WINDOW_Z_MIN, so it is mostly environment, a satellite, not a state
@@ -143,9 +159,10 @@ class DeltaRootsCrossedWarning(RuntimeWarning):
     compute went below it; more roots are needed to compute it, and how
     many is not known in advance (the missing state can come from a
     static state far above the last one computed). The count is not made
-    for every root: out['crossing_unchecked'] marks the roots left out
-    (see `solvers.solve.solve`), and no flag does not mean that no state
-    is missing."""
+    for every root, and never for 'sa_remainder', which forms no H_eff(E):
+    out['crossing_unchecked'] marks the roots left out (see
+    `solvers.solve.solve`), and no flag does not mean that no state is
+    missing."""
 
 
 @dataclass(frozen=True)
@@ -172,7 +189,11 @@ class DeltaResult:
     poles below. 'linearized' also reports
     extra['linearization_error'] (nroots,), its error estimate
     Z |<c|H_eff(E)|c> - E| in Ha, and extra['linearization_point']
-    (nroots,), the E0 each root was linearized at."""
+    (nroots,), the E0 each root was linearized at. 'sa_remainder'
+    (`RemainderSolver`) reports extra['near_pole'] and
+    extra['lanczos_change'] (nroots,), |dE(depth) - dE(depth - 1)| in Ha,
+    and no 'solutions_below' or 'above_pole'; its z is taken at the static
+    energy, its vectors are those handed in."""
     energies: np.ndarray
     static: np.ndarray
     z: np.ndarray
@@ -576,7 +597,8 @@ class EnergyDependentSolver:
     which change h and run with any backend); sides: the plain data of
     `Coupling.sides()`, [(kind, sigma, lam, b), ...], sigma None for both
     spins; numerics: a `Numerics` (None: the defaults); d_sa: the static
-    D_SA, read by the remainder method alone."""
+    D_SA (D, c), read by the remainder method alone (`RemainderSolver`),
+    ignored by the dense ones."""
 
     #: the name of the method in `DYNAMIC_METHODS`; None in the base class
     method = None
@@ -749,8 +771,240 @@ class LinearizedLowdinSolver(EnergyDependentSolver):
     method = 'linearized'
 
 
+class RemainderSolver(EnergyDependentSolver):
+    """The remainder method 'sa_remainder': the static form D_SA of Delta
+    in the Hamiltonian, and one scalar per state for what it leaves out
+    (spec 6; the benzene handoff, method 8). It needs no sector spectrum,
+    only a short block Lanczos per state, and is the method for active
+    spaces beyond the dense methods' memory limit.
+
+    What it computes. d_sa = (D, c), refused (ValueError) when None, is the
+    static form of Delta built beforehand from a declared set of states
+    (`DownfoldedHamiltonian.prepare_delta`, `state_averaged_delta`): D a
+    one-body matrix on the active orbitals and c the constant of its hole
+    part. Each state K handed to `refine` is an eigenstate of h + D, the
+    static Hamiltonian with D_SA in it, and its energy E_K the eigenvalue
+    PLUS c: E_K is the static estimate of the state's energy, and the
+    energy at which Delta is evaluated. `refine` itself takes h1, the
+    Hamiltonian WITHOUT D. The remainder of K is the expectation value of
+    the energy-dependent operator, both sides and both spins, minus that of
+    its whole static stand-in, constant included,
+
+        r_K(E)  = <K|Delta(E)|K> - (tr(D dm1_K) + c),
+        dE_K    = r_K(E_K) / (1 - r'_K(E_K)),   Z_K = 1 / (1 - r'_K(E_K)),
+
+    and the refined energy is E_K + dE_K (c is counted once: it is in E_K,
+    and the remainder takes it out together with D). <K|Delta(E)|K> is
+    sum over the poles of the removal (particle side) and attachment (hole
+    side) Green's functions of K in the Hamiltonian h1,
+    sum_{e, m} (b^T w)_em^2 / (E - p_m -+ lam_e), poles p_m and weights w
+    of `removal_spectrum` and `attachment_spectrum` started from a_u|K>
+    and a+_u|K> on the rows u of b that couple, at
+    numerics.downfolding.delta_lanczos_depth blocks. dm1_K is the
+    spin-summed one-body density matrix of K: from the engine's `rdms` when
+    it has them (`has_rdms`), otherwise <K|E_tu|K> from the engine's
+    annihilation operator.
+
+    Its approximation. The vector of a state is that of h + D and is not
+    changed: Delta - D_SA enters as one first-order (Z-renormalized)
+    energy shift per state, a Newton step from E_K, and the relaxation of
+    the state is the part D_SA already holds. It is not exact Loewdin: how
+    close it comes depends on how well D_SA represents Delta near each
+    state's energy, so on the states D_SA was built from (prepare_delta
+    should declare the states that are solved, and a state far from that
+    set is described worse). D_SA averages over the declared states, so a
+    declared state whose removal or attachment energies lie close to an
+    environment level (a strongly coupled state, Z well below 1) gives a
+    large D that changes the states of h + D for every state of the set,
+    and a first-order correction cannot undo that: there the method can
+    be far from 'lowdin', and the static states can even be other states
+    than Loewdin's. Check such cases against 'lowdin' on an active space
+    the dense methods can hold. Every root is reported with converged True
+    (nothing iterates), Z, and the smallest denominator |E - p_m -+ lam|
+    over the Lanczos poles whose weight (b^T w)^2 exceeds
+    delta_weight_floor at the refined energy. Below
+    numerics.downfolding.delta_pole_warn, at the refined energy or at E_K,
+    where r and r' were taken, the root is flagged 'delta_near_pole'
+    (DeltaNearPoleWarning), and with Z below QP_WINDOW_Z_MIN
+    'delta_satellite'. extra['near_pole'] marks the first; extra
+    ['lanczos_change'] holds |dE_K(depth) - dE_K(depth - 1)|, the change
+    of the correction when one block less is used, from the same Lanczos
+    run (zero once the Krylov space is exhausted before the depth): a large
+    value means the depth is too small for that state. The vectors
+    returned are those handed in, of unit norm.
+
+    What it does not report. It never forms H_eff(E) as a matrix, so the
+    number of solutions of the Delta problem below a root, which the dense
+    methods count (extra['solutions_below']), is not computed:
+    `solvers.solve.solve` marks every root of this method as unchecked for
+    missing states (out['crossing_unchecked'] True). The states are those
+    of h + D and their number and spin are decided by the static solve, as
+    for every dynamic backend."""
+    method = 'sa_remainder'
+
+    def __init__(self, engine, sides, numerics=None, d_sa=None):
+        if d_sa is None:
+            raise ValueError(
+                "'sa_remainder' needs d_sa = (D, c), the static D_SA built "
+                "once from a declared set of states: h = "
+                "h.prepare_delta(((nroots, spin), ...)) first "
+                "(DownfoldedHamiltonian.prepare_delta).")
+        super().__init__(engine, sides, numerics, d_sa)
+        d, c = d_sa
+        self.d, self.c = np.asarray(d, dtype=float), float(c)
+        if self.d.ndim != 2 or self.d.shape[0] != self.d.shape[1]:
+            raise ValueError(f'd_sa: D of shape {self.d.shape} is not a '
+                             f'square one-body matrix')
+
+    def refine(self, h1, eri, norb, nelec, energies, vectors, spin=None):
+        """The states (vectors, eigenstates of h1 + D in the sector nelec,
+        as the engine's `roots` returned them) and their energies E_K
+        (eigenvalues plus c) refined by the remainder (class docstring): a
+        `DeltaResult` in the order handed in, energies E_K + dE_K, static
+        E_K. h1 and eri are the static Hamiltonian WITHOUT D. spin is taken
+        for the common interface and not used: no count of solutions is
+        made. A D_SA on another number of orbitals is refused
+        (ValueError)."""
+        if self.d.shape != (norb, norb):
+            raise ValueError(f'd_sa: D of shape {self.d.shape} on {norb} '
+                             f'active orbitals')
+        settings = self.numerics.downfolding
+        nelec = (int(nelec[0]), int(nelec[1]))
+        static = np.array(energies, dtype=float).reshape(-1)
+        shapes = [np.shape(v) for v in vectors]
+        flat = [np.asarray(v, dtype=float).ravel() for v in vectors]
+        flat = [v / np.linalg.norm(v) for v in flat]
+        if len(flat) != len(static):
+            raise ValueError(f'{len(static)} energies and {len(flat)} vectors')
+        n, shape = len(static), sector_shape(norb, nelec)
+        plan = self.planned_sectors(norb, nelec)
+        short = settings.delta_lanczos_depth - 1
+        shift, z, change = np.empty(n), np.empty(n), np.empty(n)
+        smallest, at_point = np.empty(n), np.empty(n)
+        for k in range(n):
+            vector = flat[k].reshape(shape)
+            stand_in = float(np.einsum(
+                'tu,ut->', self.d, self._one_body_density(vector, norb,
+                                                          nelec))) + self.c
+            runs = []
+            for kind, sigma, _, lam, b in plan:
+                rows = np.flatnonzero(np.any(b != 0.0, axis=1))
+                runs.append((1.0 if kind == 'particle' else -1.0, lam,
+                             b[rows], _one_electron_krylov(
+                                 self.engine, -1 if kind == 'particle' else 1,
+                                 vector, h1, eri, norb, nelec, rows, sigma,
+                                 self.numerics)))
+            poles = [_Poles(sign, lam, b, *krylov.spectrum())
+                     for sign, lam, b, krylov in runs]
+            shift[k], z[k] = _remainder_step(poles, static[k], stand_in,
+                                             settings)
+            fewer = [_Poles(sign, lam, b, *krylov.spectrum(short))
+                     for sign, lam, b, krylov in runs]
+            change[k] = abs(shift[k] - _remainder_step(
+                fewer, static[k], stand_in, settings)[0])
+            smallest[k] = min((p.min_denominator(static[k] + shift[k],
+                                                 settings.delta_weight_floor)
+                               for p in poles), default=np.inf)
+            at_point[k] = min((p.min_denominator(static[k],
+                                                 settings.delta_weight_floor)
+                               for p in poles), default=np.inf)
+        out_e = static + shift
+        near = (smallest < settings.delta_pole_warn) | (
+            at_point < settings.delta_pole_warn)
+        for k in np.flatnonzero(near):
+            where = (f'lies {smallest[k]:.2e} Ha from a pole E_M -+ lam'
+                     if smallest[k] < settings.delta_pole_warn else
+                     f'was evaluated at its static energy {static[k]:.8f}, '
+                     f'{at_point[k]:.2e} Ha from a pole E_M -+ lam')
+            flag('delta_near_pole',
+                 f'Delta (sa_remainder): static state {k} at {out_e[k]:.8f} '
+                 f'{where} (Lanczos poles; below delta_pole_warn = '
+                 f'{settings.delta_pole_warn} Ha); the energy is finite, but '
+                 f'it moves fast with E there and may belong to the '
+                 f'environment state' + _STATIC_INDEX, DeltaNearPoleWarning)
+        for k in np.flatnonzero(z < QP_WINDOW_Z_MIN):
+            flag('delta_satellite',
+                 f'Delta (sa_remainder): static state {k} at {out_e[k]:.8f} '
+                 f'has Z = {z[k]:.3f}, below {QP_WINDOW_Z_MIN}: it is mostly '
+                 f'environment, a satellite, not a state of the active space'
+                 + _STATIC_INDEX, DeltaNearPoleWarning)
+        return DeltaResult(out_e, static, z, smallest,
+                           [v.reshape(s) for v, s in zip(flat, shapes)],
+                           np.ones(n, dtype=bool),
+                           {'near_pole': near, 'lanczos_change': change})
+
+    def _one_body_density(self, vector, norb, nelec):
+        """The spin-summed dm1 of a CI array of unit norm, dm1[p, q] =
+        <q+ p>: the engine's `rdms` when it has them, otherwise
+        sum_sigma <a_{q sigma} K|a_{p sigma} K> from its `annihilate`."""
+        if getattr(self.engine, 'has_rdms', False):
+            return np.asarray(self.engine.rdms(vector, norb, nelec,
+                                               spin=None)[0])
+        dm1 = np.zeros((norb, norb))
+        for sigma in (0, 1):
+            if nelec[sigma] == 0:
+                continue
+            a = np.array([np.asarray(self.engine.annihilate(
+                vector, norb, nelec, p, sigma)).ravel() for p in range(norb)])
+            dm1 += a @ a.T
+        return dm1
+
+
+@dataclass(frozen=True)
+class _Poles:
+    """The Lanczos poles of one side and spin as `RemainderSolver` uses
+    them: sign +1 (particle) or -1 (hole), the levels lam, b on the rows
+    the Lanczos started from, and its poles and weights."""
+    sign: float
+    lam: np.ndarray
+    b: np.ndarray
+    poles: np.ndarray
+    weights: np.ndarray
+
+    def denominators(self, energy):
+        """E - p_m - lam_e (particle) or E - p_m + lam_e (hole),
+        (n_levels, m)."""
+        return (energy - self.poles)[None, :] - self.sign * self.lam[:, None]
+
+    def strengths(self):
+        """(b^T w)_em^2, the weight of each pole m and level e."""
+        return (self.b.T @ self.weights) ** 2
+
+    def min_denominator(self, energy, floor):
+        """The smallest |E - p_m -+ lam_e| over the poles whose weight
+        exceeds `floor`; inf where none does."""
+        seen = self.strengths() > floor
+        if not np.any(seen):
+            return np.inf
+        return float(np.abs(self.denominators(energy))[seen].min())
+
+
+def _remainder_step(poles, energy, stand_in, settings):
+    """(dE, Z) of one state: g = <K|Delta(E)|K> and g' its derivative from
+    the `_Poles` of every side and spin, r = g - stand_in, Z = 1 / (1 - g'),
+    dE = r Z. A denominator smaller in size than delta_conv is taken at that
+    size with its sign (+ for an exact zero), as in the dense kernel, so a
+    state on a pole gives a finite energy."""
+    g, dg = 0.0, 0.0
+    for p in poles:
+        if p.poles.size == 0:
+            continue
+        den = p.denominators(energy)
+        small = np.abs(den) < settings.delta_conv
+        if np.any(small):
+            den = np.where(small, np.where(den < 0, -settings.delta_conv,
+                                           settings.delta_conv), den)
+        strength = p.strengths()
+        g += float(np.sum(strength / den))
+        dg -= float(np.sum(strength / den ** 2))
+    z = 1.0 / (1.0 - dg)
+    return (g - stand_in) * z, z
+
+
 #: the dynamic backends by the name of their method
-DYNAMIC_METHODS = {'lowdin': LowdinSolver, 'linearized': LinearizedLowdinSolver}
+DYNAMIC_METHODS = {'lowdin': LowdinSolver,
+                   'linearized': LinearizedLowdinSolver,
+                   'sa_remainder': RemainderSolver}
 
 
 # ------------------------------- the Green's functions of a state by Lanczos
@@ -799,6 +1053,46 @@ def block_lanczos(matvec, start, numerics):
     zero has zero weights in every pole. A start block with no column left
     (every start vector zero, or no start vector) gives poles (0,) and
     weights (n_start, 0)."""
+    return _krylov(matvec, start, numerics).spectrum()
+
+
+class _Krylov:
+    """The blocks of one run of `block_lanczos`: the diagonal blocks
+    Q_j^T H Q_j, the couplings C_{j+1} and B, the kept rows of R of the
+    start block (n_start columns). `spectrum(n)` is the result of the same
+    run stopped after n blocks, which is what a run at depth n gives: the
+    first n blocks do not depend on the depth."""
+
+    def __init__(self, diagonal, coupling, coef):
+        self.diagonal, self.coupling, self.coef = diagonal, coupling, coef
+
+    @property
+    def blocks(self):
+        """The number of blocks built."""
+        return len(self.diagonal)
+
+    def spectrum(self, n_blocks=None):
+        """(poles, weights) of `block_lanczos` from the first n_blocks
+        blocks (None: every block built); no block gives poles (0,) and
+        weights (n_start, 0)."""
+        n = self.blocks if n_blocks is None else min(n_blocks, self.blocks)
+        if n == 0:
+            return np.zeros(0), np.zeros((self.coef.shape[1], 0))
+        diagonal, coupling = self.diagonal[:n], self.coupling[:n - 1]
+        sizes = [d.shape[0] for d in diagonal]
+        edges = np.concatenate([[0], np.cumsum(sizes)]).astype(int)
+        t = np.zeros((edges[-1], edges[-1]))
+        for j, d in enumerate(diagonal):
+            t[edges[j]:edges[j + 1], edges[j]:edges[j + 1]] = d
+        for j, c in enumerate(coupling):
+            t[edges[j + 1]:edges[j + 2], edges[j]:edges[j + 1]] = c
+            t[edges[j]:edges[j + 1], edges[j + 1]:edges[j + 2]] = c.T
+        poles, vecs = np.linalg.eigh(t)
+        return poles, self.coef.T @ vecs[:edges[1]]
+
+
+def _krylov(matvec, start, numerics):
+    """The `_Krylov` of `block_lanczos` (its arguments and conventions)."""
     settings = numerics_or_default(numerics).downfolding
     start = np.array(start, dtype=float)
     if start.ndim != 2:
@@ -807,7 +1101,7 @@ def block_lanczos(matvec, start, numerics):
     start[:, np.linalg.norm(start, axis=0) < settings.delta_rank_tol] = 0.0
     q, coef = _kept_columns(start, settings)
     if q.shape[1] == 0:
-        return np.zeros(0), np.zeros((start.shape[1], 0))
+        return _Krylov([], [], np.zeros((0, start.shape[1])))
     blocks, diagonal, coupling = [q], [], []
     while True:
         hq = np.column_stack([np.asarray(matvec(c), dtype=float).ravel()
@@ -824,16 +1118,7 @@ def block_lanczos(matvec, start, numerics):
             break
         blocks.append(q)
         coupling.append(c)
-    sizes = [d.shape[0] for d in diagonal]
-    edges = np.concatenate([[0], np.cumsum(sizes)]).astype(int)
-    t = np.zeros((edges[-1], edges[-1]))
-    for j, d in enumerate(diagonal):
-        t[edges[j]:edges[j + 1], edges[j]:edges[j + 1]] = d
-    for j, c in enumerate(coupling):
-        t[edges[j + 1]:edges[j + 2], edges[j]:edges[j + 1]] = c
-        t[edges[j]:edges[j + 1], edges[j + 1]:edges[j + 2]] = c.T
-    poles, vecs = np.linalg.eigh(t)
-    return poles, coef.T @ vecs[:edges[1]]
+    return _Krylov(diagonal, coupling, coef)
 
 
 def _kept_columns(block, settings):
@@ -885,8 +1170,8 @@ def removal_spectrum(engine, vector, h1, eri, norb, nelec, orbitals, sigma,
     sigma to remove: no sector, poles (0,) and weights
     (len(orbitals), 0). The kernel works on flattened CI vectors; the
     engine's product sees CI arrays of the sector's shape."""
-    return _one_electron_spectrum(engine, -1, vector, h1, eri, norb, nelec,
-                                  orbitals, sigma, numerics)
+    return _one_electron_krylov(engine, -1, vector, h1, eri, norb, nelec,
+                                orbitals, sigma, numerics).spectrum()
 
 
 def attachment_spectrum(engine, vector, h1, eri, norb, nelec, orbitals,
@@ -906,13 +1191,15 @@ def attachment_spectrum(engine, vector, h1, eri, norb, nelec, orbitals,
     zero weights in every pole. The spin
     sigma full (n_sigma = norb): no sector, poles (0,) and weights
     (len(orbitals), 0)."""
-    return _one_electron_spectrum(engine, +1, vector, h1, eri, norb, nelec,
-                                  orbitals, sigma, numerics)
+    return _one_electron_krylov(engine, +1, vector, h1, eri, norb, nelec,
+                                orbitals, sigma, numerics).spectrum()
 
 
-def _one_electron_spectrum(engine, step, vector, h1, eri, norb, nelec,
-                           orbitals, sigma, numerics):
-    """`removal_spectrum` (step -1) or `attachment_spectrum` (step +1)."""
+def _one_electron_krylov(engine, step, vector, h1, eri, norb, nelec,
+                         orbitals, sigma, numerics):
+    """The `_Krylov` of `removal_spectrum` (step -1) or
+    `attachment_spectrum` (step +1); a sector that does not exist has no
+    block."""
     _require_sector_operations(engine)
     if sigma not in (0, 1):
         raise ValueError(f'sigma={sigma!r}: 0 (alpha) or 1 (beta)')
@@ -923,7 +1210,7 @@ def _one_electron_spectrum(engine, step, vector, h1, eri, norb, nelec,
     target = tuple(target)
     shape = sector_shape(norb, target)
     if 0 in shape:
-        return np.zeros(0), np.zeros((len(orbitals), 0))
+        return _Krylov([], [], np.zeros((0, len(orbitals))))
     op = engine.annihilate if step < 0 else engine.create
     start = np.zeros((math.prod(shape), len(orbitals)))
     for i, u in enumerate(orbitals):
@@ -932,4 +1219,4 @@ def _one_electron_spectrum(engine, step, vector, h1, eri, norb, nelec,
 
     def matvec(v):
         return np.asarray(product(v.reshape(shape))).ravel()
-    return block_lanczos(matvec, start, numerics)
+    return _krylov(matvec, start, numerics)

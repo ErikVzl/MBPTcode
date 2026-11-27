@@ -31,7 +31,7 @@ from src.EffectiveHamiltonian.Downfolding.hybridization import (
     state_averaged_delta, static_mf_delta)
 from src.EffectiveHamiltonian.solvers.backends import PyscfFCISolver
 from src.EffectiveHamiltonian.solvers.dynamic_backends import (
-    DYNAMIC_METHODS, DeltaLinearizationWarning, LowdinSolver)
+    DENSE_MATRICES, DYNAMIC_METHODS, DeltaLinearizationWarning, LowdinSolver)
 from src.EffectiveHamiltonian.solvers.solve import SolveRequest, static_states
 from tests.no_downfolding import nitrogen, no_space, pq_spectrum, water
 
@@ -107,7 +107,7 @@ def solved(case):
     with both sides."""
     h1, eri, sides, engine, E, V = case
     return {m: _record(lambda m=m: DYNAMIC_METHODS[m](engine, sides).refine(
-        h1, eri, 4, (2, 2), E, V)) for m in DYNAMIC_METHODS}
+        h1, eri, 4, (2, 2), E, V)) for m in DENSE_MATRICES}
 
 
 # ---------------------------------------------------------- the dense side
@@ -325,7 +325,7 @@ def n2():
     return h1, eri, h.hybridization.sides(), PyscfFCISolver()
 
 
-@pytest.mark.parametrize('method', sorted(DYNAMIC_METHODS))
+@pytest.mark.parametrize('method', sorted(DENSE_MATRICES))
 def test_degenerate_partners_with_both_sides(n2, method):
     """The pairs of degenerate states among the lowest eight of N2 CAS(6,6)
     at (3, 3), both sides folded: one energy, 1e-8 Ha, and two different

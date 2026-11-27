@@ -598,6 +598,14 @@ class DownfoldingNumerics:
     dropped reproduce the moments s_t^T H^n s_u of the start vectors s_t
     (a_t|K> or a+_t|K>) for n = 0 .. 2d - 1, and fewer blocks are built
     when a new block has no column left (the Krylov space is exhausted).
+    It is the depth of the remainder method 'sa_remainder'
+    (`solvers.dynamic_backends.RemainderSolver`), whose
+    extra['lanczos_change'] (out['lanczos_change'] of a solve) reports,
+    per state, |dE(depth) - dE(depth - 1)|, Hartree: how much the
+    state's correction changes when one block less is used, both from the
+    same Lanczos run. It is zero when the Krylov space is exhausted before
+    the depth (the spectrum is then exact); a value that is not small
+    against the accuracy wanted says to raise the depth.
     delta_rank_tol: a start vector
     whose norm is below this is taken as zero (zero weights in every pole),
     and a column of the QR factorization of a block whose |R_jj| is below
