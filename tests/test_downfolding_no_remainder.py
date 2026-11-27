@@ -8,25 +8,26 @@ state, the expectation value of what D_SA leaves out,
 with |K>, E_K the states of h + D and their energies plus c, and the
 (N-1)- and (N+1)-electron spectra of h by block Lanczos.
 
-Water/6-31G on the NO CAS(4,4) of Task 8, D_SA from the states
-((3, 0), (2, 2)) declared together: the excitation energies against exact
-Loewdin, with canonical occupied orbitals (particle side) and with both
-blocks rotated (both sides) on HF and on PBE0, and the total ground-state
-energy with both sides, which sees the constant c of D_SA, all at the
-spec's bar of 0.01 eV; at the default depth the change of dE from one
-block less below 1e-5. These miss their bars and are xfail(strict=True),
-with the measured numbers in their docstrings (WATER_MISSES), for Erik to
-decide. At the full Lanczos depth the remainder equals the one built from
+The weakly coupled cases meet the spec's bar of 0.01 eV against exact
+Loewdin, on totals and excitation energies, without the flag
+'delta_remainder_large': benzene/cc-pVDZ pi NO CAS(6,6) with virtual NOs,
+N2/6-31G NO CAS(6,6) of Task 8 with the particle side and with both sides,
+and the ground-state total of N2 with both sides, which sees the constant
+c of D_SA. Water/6-31G NO CAS(4,4) of Task 8, D_SA of ((3, 0), (2, 2)), is
+coupled strongly and misses the bar (HF with the particle side, HF and PBE0
+with both sides): 'delta_remainder_large' names exactly the states whose
+correction exceeds delta_remainder_warn, every state that misses among
+them. At the full Lanczos depth the remainder equals the one built from
 the dense amplitudes of the dense methods, and E_K + r_K equals
 <K|H_N + Delta(E_K)|K>; lanczos_change is the difference from one block
-less of the same run; a Lanczos pole moved next to and onto a state gives
-a finite energy and 'delta_near_pole'; every root is marked unchecked for
+less of the same run and below 1e-5 at the default depth on water; a
+Lanczos pole moved next to and onto a state gives a finite energy and
+'delta_near_pole'; a zero coupling and a space without active virtual
+orbitals give the static energies; every root is marked unchecked for
 missing states; the density matrix taken from the sector operations equals
-the engine's. N2/6-31G on the NO CAS(6,6) of Task 8, coupled weakly: the
-ten states of D_SA against exact Loewdin within the bar, and the two
-partners of a degenerate state with one energy. A record without D_SA, a
-solve without d_sa, and a solver without sector operations are refused
-before anything is solved."""
+the engine's; the two partners of a degenerate state of N2 come out with
+one energy. A record without D_SA, a solve without d_sa, and a solver
+without sector operations are refused before anything is solved."""
 import warnings
 
 import numpy as np
@@ -39,10 +40,11 @@ from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
 from src.EffectiveHamiltonian.solvers import solve as solve_module
 from src.EffectiveHamiltonian.solvers.backends import PyscfFCISolver
 from src.EffectiveHamiltonian.solvers.dynamic_backends import (
-    DYNAMIC_METHODS, DeltaNearPoleWarning, LowdinSolver, RemainderSolver,
-    removal_spectrum)
+    DYNAMIC_METHODS, DeltaNearPoleWarning, DeltaRemainderWarning,
+    LowdinSolver, RemainderSolver, removal_spectrum)
 from src.EffectiveHamiltonian.solvers.solve import solve
-from tests.no_downfolding import nitrogen, no_space, water
+from tests.no_downfolding import (benzene, benzene_pi_space, nitrogen,
+                                  no_space, water)
 
 #: the states D_SA is built from, declared together: three singlets and
 #: two triplets
@@ -79,10 +81,10 @@ def _record(call):
 
 
 def _close_chkfile(mf):
-    """Close pyscf's temporary chkfile of a mean field. The xfail tests
-    below raise, and the last traceback keeps the fixtures alive past the
-    module; the chkfile is then finalized by the last garbage collection,
-    which warns (ResourceWarning) unless it was closed here."""
+    """Close pyscf's temporary chkfile of a mean field at the teardown of
+    a fixture. A traceback that outlives the module (a failing test) keeps
+    the fixtures alive; the chkfile is then finalized by the last garbage
+    collection, which warns (ResourceWarning) unless it was closed here."""
     chkfile = getattr(mf, '_chkfile', None)
     if chkfile is not None:
         chkfile.close()
@@ -115,134 +117,175 @@ def records(lows):
     return out
 
 
-def _totals(h, method):
-    """{(spin, k): total energy} of the requests of STATES by `method`, and
-    the flags raised."""
-    energies, names = {}, set()
-    for n, spin in STATES:
-        e, flags, _ = _record(lambda: h.solve('pyscf_fci', delta_method=method,
-                                              nroots=n, spin=spin))
-        names.update(flags)
-        energies.update({(spin, k): float(x) for k, x in enumerate(e)})
-    return energies, sorted(names)
+#: the states of D_SA on N2 (a set that ends between two pairs) and on
+#: benzene, of any spin
+N2_STATES = ((10, None),)
+BENZENE_STATES = ((7, None),)
 
 
-def _against_lowdin(h, label):
-    """(max |difference| of the excitation energies, of the totals) of
-    'sa_remainder' against 'lowdin' over the states of STATES, the
-    excitation energies taken from each method's own singlet ground
-    state."""
-    got, got_flags = _totals(h, 'sa_remainder')
-    want, want_flags = _totals(h, 'lowdin')
-    print(f'{label}: flags sa_remainder {got_flags}, lowdin {want_flags}')
-    worst = 0.0
-    for key in sorted(got):
-        exc_got = got[key] - got[0, 0]
-        exc_want = want[key] - want[0, 0]
-        worst = max(worst, abs(exc_got - exc_want))
-        print(f'  spin {key[0]} root {key[1]}: total {got[key]:.8f} vs '
-              f'{want[key]:.8f} ({got[key] - want[key]:+.2e}), excitation '
-              f'{exc_got:.6f} vs {exc_want:.6f} '
-              f'({exc_got - exc_want:+.2e})')
-    return worst, abs(got[0, 0] - want[0, 0])
+@pytest.fixture(scope='module')
+def weak():
+    """{(molecule, rotate_occupied): (record, record with D_SA)}, the
+    weakly coupled cases: N2/6-31G NO CAS(6,6) (Task 8) with canonical
+    occupied orbitals (particle side) and with both blocks rotated (both
+    sides; its occupied cut runs with NearDegenerateCutWarning), D_SA of
+    N2_STATES; benzene/cc-pVDZ pi NO CAS(6,6), virtual NOs, D_SA of
+    BENZENE_STATES."""
+    out, lows = {}, []
+    low = run_low_level(nitrogen(), method='rpa', mode='casida',
+                        natural_orbitals=True)
+    lows.append(low)
+    for rotate in (False, True):
+        h = _record(lambda: build_effective_hamiltonian(
+            low, no_space(low, 3, 3, rotate_occupied=rotate),
+            screening='crpa'))[0]
+        out['n2', rotate] = h, h.prepare_delta(N2_STATES)
+    low = run_low_level(benzene(), method='rpa', mode='casida',
+                        natural_orbitals=True)
+    lows.append(low)
+    h = build_effective_hamiltonian(low, benzene_pi_space(low),
+                                    screening='crpa')
+    out['benzene', False] = h, h.prepare_delta(BENZENE_STATES)
+    yield out
+    for low in lows:
+        _close_chkfile(low.mf)
 
 
-def _report(h):
-    """Z and lanczos_change of each state of STATES by 'sa_remainder'."""
-    for n, spin in STATES:
-        out = {}
-        _record(lambda: h.solve('pyscf_fci', delta_method='sa_remainder',
-                                nroots=n, spin=spin, out=out))
-        print(f'  spin {spin}: Z {np.round(out["z"], 4).tolist()}, '
-              f'correction {np.round(out["correction"], 6).tolist()}, '
-              f'lanczos_change '
-              f'{[f"{x:.1e}" for x in out["lanczos_change"]]}')
+def _compare(h, hs, requests, label):
+    """'sa_remainder' (record hs, with D_SA) against 'lowdin' (record h)
+    over the requests: (rows, flagged, names), rows {(spin, k): (total
+    sa_remainder, total lowdin, |dE_K|)} and flagged the (spin, k) that
+    'delta_remainder_large' names, per request through
+    out['static_index'], and names those of every flag 'sa_remainder'
+    raised. Printed per state: |dE|, the total and the
+    excitation difference (from the first request's lowest state)."""
+    rows, flagged, names = {}, set(), set()
+    for n, spin in requests:
+        out, flags = {}, []
+        with collecting(flags), warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            got = hs.solve('pyscf_fci', delta_method='sa_remainder',
+                           nroots=n, spin=spin, out=out)
+        want, _, _ = _record(lambda: h.solve('pyscf_fci',
+                                             delta_method='lowdin',
+                                             nroots=n, spin=spin))
+        names.update(f['flag'] for f in flags)
+        returned = {int(k): i for i, k in enumerate(out['static_index'])}
+        flagged.update((spin, returned[int(
+            f['message'].split('static state ')[1].split()[0])])
+            for f in flags if f['flag'] == 'delta_remainder_large')
+        for k in range(len(got)):
+            rows[spin, k] = (float(got[k]), float(want[k]),
+                             abs(float(out['correction'][k])))
+    first = (requests[0][1], 0)
+    print(f'{label}:')
+    for key, (got, want, de) in rows.items():
+        exc = (got - rows[first][0]) - (want - rows[first][1])
+        print(f'  spin {key[0]} root {key[1]}: |dE| {de:.2e}, total '
+              f'{got - want:+.2e}, excitation {exc:+.2e}'
+              f'{"  flagged" if key in flagged else ""}')
+    print(f'  flags {sorted(names)}')
+    return rows, flagged, names
 
 
-#: why the comparisons with exact Loewdin on water fail the bar, for Erik
-#: to decide (Task 11, ruling 5: the bar is not loosened)
-WATER_MISSES = (
-    "sa_remainder misses the spec's bar of 3.7e-4 Ha on the water NO "
-    "CAS(4,4), HF: the diagonal of D_SA of ((3, 0), (2, 2)) on the active "
-    "virtuals is -0.51 and -0.86 Ha (particle side; -0.43 and -0.64 with "
-    "both sides), because the excited singlets' removal energies from "
-    "their singly occupied active virtual, +0.33 and +0.36 Ha, lie 0.24 to "
-    "0.27 Ha below the lowest environment level, 0.60 Ha; the states of "
-    "h + D_SA are then not those of Loewdin. See the measured numbers in "
-    "the docstring")
+def _worst(rows):
+    """(max |difference| of the totals, of the excitation energies)."""
+    first = next(iter(rows))
+    totals = max(abs(got - want) for got, want, _ in rows.values())
+    excitation = max(abs((got - rows[first][0]) - (want - rows[first][1]))
+                     for got, want, _ in rows.values())
+    return totals, excitation
 
 
 # ------------------------------------------------------ against Loewdin
-@pytest.mark.xfail(strict=True, reason=WATER_MISSES)
-def test_remainder_against_lowdin(records):
-    """The excitation energies of the states of STATES, canonical
-    occupied orbitals (the particle side), against exact Loewdin: within
-    the spec's bar, 0.01 eV.
+@pytest.mark.parametrize('molecule', ['benzene', 'n2'])
+def test_remainder_against_lowdin(weak, molecule):
+    """The particle side (canonical occupied orbitals on N2, virtual NOs on
+    benzene): the totals and the excitation energies of the states D_SA is
+    built from against exact Loewdin within the spec's bar, 0.01 eV, and no
+    'delta_remainder_large'.
 
-    Measured (2026-11-27), sa_remainder - lowdin, excitation energies from
-    each method's singlet ground state: singlets 1, 2 +1.12e-2, +8.14e-1
-    Ha; triplets 0, 1 +8.69e-3, +1.85e-2 Ha; the ground-state total
-    +4.92e-2 Ha. Z (sa_remainder) 0.995, 0.834, 0.880 (singlets), 0.847,
-    0.847 (triplets); lanczos_change 1.5e-5, 7.4e-5, 1.4e-3, 9.5e-5,
-    1.7e-5. The third singlet of h + D_SA is another state than Loewdin's
-    (active virtual 3 nearly doubly occupied, occupation 1.93), so its
-    remainder is 1.25 Ha. With D_SA, the ground state of h + D_SA has an
-    active virtual occupation of 0.081 where that of h has 0.002. On N2,
-    coupled weakly, the method meets the bar
-    (`test_remainder_against_lowdin_on_n2`)."""
-    h = records['hf', False]
-    worst, _ = _against_lowdin(h, 'HF, particle side')
-    _report(h)
-    print(f'max |sa_remainder - lowdin| on excitation energies: {worst:.2e}')
-    assert worst < BAR
+    Measured (2026-11-27), max |sa_remainder - lowdin|: benzene totals
+    1.09e-4 Ha, excitation energies 8.5e-5 Ha, |dE_K| 1.7e-4 to 4.2e-3 Ha;
+    N2 totals 1.73e-4 Ha, excitation energies 1.29e-4 Ha, |dE_K| 5.5e-5 to
+    6.1e-3 Ha."""
+    h, hs = weak[molecule, False]
+    rows, flagged, _ = _compare(h, hs, BENZENE_STATES if molecule == 'benzene'
+                             else N2_STATES, molecule)
+    totals, excitation = _worst(rows)
+    print(f'max |sa_remainder - lowdin|: totals {totals:.2e}, excitation '
+          f'energies {excitation:.2e}')
+    assert totals < BAR and excitation < BAR
+    assert flagged == set()
 
 
-@pytest.mark.xfail(strict=True, reason=WATER_MISSES)
-@pytest.mark.parametrize('xc', ['hf', 'pbe0'])
-def test_remainder_with_the_hole_side(records, xc):
-    """Both blocks rotated, so both sides are folded: the excitation
-    energies against exact Loewdin within the spec's bar.
+def test_remainder_with_the_hole_side(weak):
+    """N2 with both blocks rotated, so both sides are folded: the
+    excitation energies against exact Loewdin within the spec's bar, and
+    no 'delta_remainder_large'. (Benzene's pi CAS(6,6) holds every pi
+    occupied orbital, so its hole coupling to the inactive sigma orbitals
+    vanishes by symmetry and adds no case.)
 
-    Measured (2026-11-27), sa_remainder - lowdin on the excitation
-    energies, singlets 1, 2 and triplets 0, 1:
-    HF +7.68e-3, +5.12e-2, +6.29e-3, +2.78e-2 Ha (Z 0.995, 0.752, 0.782,
-    0.818, 0.818; lanczos_change 2.9e-5, 1.0e-3, 2.1e-3, 2.2e-4, 6.2e-4);
-    PBE0 +2.14e-3, +1.56e-2, +3.90e-3, +1.10e-2 Ha (Z 0.998, 0.738,
-    0.782, 0.812, 0.824; lanczos_change 8.7e-6, 4.2e-4, 9.0e-4, 1.4e-4,
-    2.3e-4)."""
-    h = records[xc, True]
+    Measured (2026-11-27): max |sa_remainder - lowdin| on the excitation
+    energies 1.61e-4 Ha, on the totals 1.92e-4 Ha; |dE_K| 7.0e-4 to
+    7.0e-3 Ha."""
+    h, hs = weak['n2', True]
     assert [kind for kind, _, _, _ in h.hybridization.sides()] == [
         'particle', 'hole']
-    worst, _ = _against_lowdin(h, f'{xc}, both sides')
-    _report(h)
-    print(f'max |sa_remainder - lowdin| on excitation energies: {worst:.2e}')
-    assert worst < BAR
+    rows, flagged, _ = _compare(h, hs, N2_STATES, 'n2, both sides')
+    totals, excitation = _worst(rows)
+    print(f'max |sa_remainder - lowdin|: totals {totals:.2e}, excitation '
+          f'energies {excitation:.2e}')
+    assert excitation < BAR and flagged == set()
 
 
-@pytest.mark.xfail(strict=True, reason=WATER_MISSES)
-@pytest.mark.parametrize('xc', ['hf', 'pbe0'])
-def test_total_energy_with_the_hole_side(records, xc):
-    """The total of the ground state with both sides against exact
+def test_total_energy_with_the_hole_side(weak):
+    """The total of the ground state of N2 with both sides against exact
     Loewdin: the excitation energies do not see the constant c of D_SA,
     the total does (it enters through the static energies E_K and is
-    taken out again by the remainder).
+    taken out again by the remainder). That it is counted once is checked
+    to 1e-9 by `test_lanczos_equals_dense_spectrum`.
 
-    Measured (2026-11-27), sa_remainder - lowdin on the ground-state
-    total: HF +2.87e-2 Ha (c = -0.125153, Z 0.995, lanczos_change
-    2.9e-5); PBE0 +4.47e-3 Ha (c = -0.089374, Z 0.998, lanczos_change
-    8.7e-6). That the constant is counted once is checked to 1e-9 by
-    `test_lanczos_equals_dense_spectrum` (E_K + r_K against
-    <K|H_N + Delta(E_K)|K>)."""
-    h = records[xc, True]
-    c = h.hybridization.d_sa[1]
+    Measured (2026-11-27): +1.92e-4 Ha."""
+    h, hs = weak['n2', True]
+    c = hs.hybridization.d_sa[1]
     assert abs(c) > 1e-4
-    got, _, _ = _record(lambda: h.solve('pyscf_fci',
-                                        delta_method='sa_remainder', spin=0))
-    want, _, _ = _record(lambda: h.solve('pyscf_fci', delta_method='lowdin',
-                                         spin=0))
-    print(f'{xc}: c = {c:.6f}, total {got[0]:.8f} vs Loewdin {want[0]:.8f}: '
+    got, _, _ = _record(lambda: hs.solve('pyscf_fci',
+                                         delta_method='sa_remainder'))
+    want, _, _ = _record(lambda: h.solve('pyscf_fci', delta_method='lowdin'))
+    print(f'N2: c = {c:.6f}, total {got[0]:.8f} vs Loewdin {want[0]:.8f}: '
           f'{got[0] - want[0]:+.2e}')
     assert abs(got[0] - want[0]) < BAR
+
+
+@pytest.mark.parametrize('case', [('hf', False), ('hf', True),
+                                  ('pbe0', True)])
+def test_strong_coupling_is_flagged(records, case):
+    """Water NO CAS(4,4), D_SA of STATES: coupled strongly, and
+    sa_remainder misses the bar. 'delta_remainder_large' names exactly the
+    states whose |dE_K| exceeds delta_remainder_warn, and every state that
+    misses the bar on its total is among them.
+
+    Measured (2026-11-27), per case |dE_K| (singlets 0, 1, 2; triplets 0,
+    1) and sa_remainder - lowdin on the totals, all flagged:
+    HF particle side |dE| 6.1e-2, 5.3e-1, 1.25, 5.5e-1, 5.5e-1 Ha, totals
+    +4.9e-2, +6.0e-2, +8.6e-1, +5.8e-2, +6.8e-2 Ha (the third singlet of
+    h + D_SA is another state than Loewdin's); HF both sides |dE| 5.7e-2,
+    2.9e-1, 3.1e-1, 3.7e-1, 3.2e-1 Ha, totals +2.9e-2, +3.6e-2, +8.0e-2,
+    +3.5e-2, +5.7e-2 Ha; PBE0 both sides |dE| 1.5e-2, 1.1e-1, 1.1e-1,
+    1.7e-1, 1.4e-1 Ha, totals +4.5e-3, +6.6e-3, +2.0e-2, +8.4e-3,
+    +1.6e-2 Ha. The ground state, whose |dE| is smallest, is above the
+    threshold in all three. Z of these states 0.74 to 1.0; nothing lies
+    next to a pole ('delta_near_pole' does not fire)."""
+    hs = records[case]
+    threshold = hs.numerics.downfolding.delta_remainder_warn
+    rows, flagged, names = _compare(hs, hs, STATES, f'water {case}')
+    large = {key for key, (_, _, de) in rows.items() if de > threshold}
+    missed = {key for key, (got, want, _) in rows.items()
+              if abs(got - want) > BAR}
+    assert flagged == large
+    assert missed and missed <= flagged
+    assert 'delta_near_pole' not in names
 
 
 # ------------------------------------------------------- the Lanczos part
@@ -324,19 +367,15 @@ def test_lanczos_change_is_one_block_less(records):
     assert np.abs(three.extra['lanczos_change'] - by_hand).max() < 1e-12
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'lanczos_change at the default depth 3 is above 1e-5 on water and on '
-    'N2; see the measured numbers in the docstring'))
 def test_depth_convergence_is_reported(records):
-    """out['lanczos_change'] below 1e-5 at the default depth (3), water
-    NO CAS(4,4) with both sides, the three lowest singlets.
+    """out['lanczos_change'] below 1e-5 at the default depth (5), water
+    NO CAS(4,4) with both sides, the three lowest singlets, the most
+    strongly coupled case.
 
-    Measured (2026-11-27): 2.9e-5, 1.0e-3, 2.1e-3 Ha. With depth the
-    corrections converge (singlets of the same case, change from one
-    block less: depth 4 3.5e-6, 2.7e-5, 6.9e-5; depth 5 3.1e-7, 5.9e-7,
-    2.9e-6). On N2 (`test_remainder_against_lowdin_on_n2`, weak coupling)
-    the change at depth 3 is up to 5.6e-5 Ha, below the bar of 3.7e-4 Ha
-    but above 1e-5."""
+    Measured (2026-11-27): 3.1e-7, 5.9e-7, 2.9e-6 Ha at depth 5 (2.9e-5,
+    1.0e-3, 2.1e-3 Ha at depth 3, the default before). The change at depth
+    d follows the error at depth d - 1 against the full depth (depth 3:
+    3.8e-6, 2.8e-5, 7.2e-5 Ha; depth 5: 7.5e-10, 3.4e-8, 1.2e-7 Ha)."""
     h = records['hf', True]
     out = {}
     _record(lambda: h.solve('pyscf_fci', delta_method='sa_remainder',
@@ -391,12 +430,49 @@ def test_near_pole_is_flagged_not_nan(records, distance):
     ground state, never inf or NaN."""
     res, names, states, caught = _moved_pole(records, distance)
     assert 'delta_near_pole' in names and 0 in states
-    assert set(names) <= {'delta_near_pole', 'delta_satellite'}
-    assert caught == {DeltaNearPoleWarning}
+    assert set(names) <= {'delta_near_pole', 'delta_satellite',
+                          'delta_remainder_large'}
+    assert DeltaNearPoleWarning in caught
+    assert caught <= {DeltaNearPoleWarning, DeltaRemainderWarning}
     assert res.extra['near_pole'][0]
     for x in (res.energies, res.z, res.min_denominator,
               res.extra['lanczos_change']):
         assert np.all(np.isfinite(x))
+
+
+def test_zero_coupling_and_no_active_virtual(records, lows):
+    """Review Focus 1 for 'sa_remainder' (the dense methods have theirs in
+    tests/test_downfolding_no_delta_dense.py): a coupling whose b is zero,
+    with a zero D_SA, gives the static energies exactly, Z = 1 and no
+    Lanczos change; an active space with no active virtual orbital has no
+    side and a zero D_SA, and the record's solve gives the energies of
+    'lowdin' (the static ones) exactly, with zero corrections."""
+    h = records['hf', False]
+    h1, eri = _integrals(h)
+    zero = [(k, s, lam, np.zeros_like(b))
+            for k, s, lam, b in h.hybridization.sides()]
+    engine = PyscfFCISolver()
+    E, V = engine.roots(h1, eri, 4, (2, 2), nroots=3, spin=None)
+    res, names, _ = _record(lambda: RemainderSolver(
+        engine, zero, d_sa=(np.zeros((4, 4)), 0.0)).refine(
+        h1, eri, 4, (2, 2), E, V))
+    assert np.array_equal(res.energies, E) and np.all(res.z == 1.0)
+    assert np.array_equal(res.extra['lanczos_change'], np.zeros(3))
+    assert names == []
+    low = lows['hf']
+    bare = build_effective_hamiltonian(low, no_space(low, 2, 0),
+                                       screening='crpa')
+    assert bare.hybridization.sides() == []
+    prepared = bare.prepare_delta(((1, 0),))
+    D, c = prepared.hybridization.d_sa
+    assert np.array_equal(D, np.zeros((2, 2))) and c == 0.0
+    out = {}
+    got, names, _ = _record(lambda: prepared.solve(
+        'pyscf_fci', delta_method='sa_remainder', out=out))
+    want, _, _ = _record(lambda: bare.solve('pyscf_fci',
+                                            delta_method='lowdin'))
+    assert np.array_equal(got, want) and names == []
+    assert np.array_equal(out['correction'], [0.0]) and out['z'][0] == 1.0
 
 
 class _NoRdms(PyscfFCISolver):
@@ -461,45 +537,14 @@ def test_out_and_the_crossing_check(records):
 
 
 # ------------------------------------------------------- degenerate states
-@pytest.fixture(scope='module')
-def n2():
-    """N2 NO CAS(6,6) of Task 8 (particle side), without and with D_SA of
-    its lowest ten states of any spin (a set that ends between two
-    pairs)."""
-    low = run_low_level(nitrogen(), method='rpa', mode='casida',
-                        natural_orbitals=True)
-    h = build_effective_hamiltonian(low, no_space(low, 3, 3),
-                                    screening='crpa')
-    yield h, h.prepare_delta(((10, None),))
-    _close_chkfile(low.mf)
 
 
-def test_remainder_against_lowdin_on_n2(n2):
-    """N2, coupled weakly (Z above 0.9): the ten states D_SA is built from,
-    totals and excitation energies against exact Loewdin within the spec's
-    bar."""
-    h, hs = n2
-    got, _, _ = _record(lambda: hs.solve('pyscf_fci', nroots=10,
-                                         delta_method='sa_remainder'))
-    want, _, _ = _record(lambda: h.solve('pyscf_fci', nroots=10,
-                                         delta_method='lowdin'))
-    static, _, _ = _record(lambda: hs.solve('pyscf_fci', nroots=10,
-                                            delta_method='static_sa'))
-    total = np.abs(got - want).max()
-    excitation = np.abs((got - got[0]) - (want - want[0])).max()
-    print(f'N2: sa_remainder - lowdin {np.round(got - want, 6).tolist()}; '
-          f'static_sa - lowdin {np.round(static - want, 6).tolist()}')
-    print(f'max |sa_remainder - lowdin|: totals {total:.2e}, excitation '
-          f'energies {excitation:.2e}')
-    assert total < BAR and excitation < BAR
-
-
-def test_degenerate_partners(n2):
+def test_degenerate_partners(weak):
     """The pairs of degenerate states among the lowest eight of h + D_SA
     of N2 CAS(6,6) at (3, 3): one energy after the remainder, 1e-8 Ha (a
     per-state scalar, each partner refined on its own), and two different
     states."""
-    _, hs = n2
+    _, hs = weak['n2', False]
     h1, eri = _integrals(hs)
     sides, d_sa = hs.hybridization.sides(), hs.hybridization.d_sa
     D, c = d_sa

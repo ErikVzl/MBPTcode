@@ -434,10 +434,13 @@ DOWNFOLDING_DELTA_OCCUPATION_FLOOR = 1e-6
 # (`dynamic_backends.block_lanczos`) build at most this many blocks of the
 # Krylov space of the start vectors s_t (a_t|K> or a+_t|K>). d blocks with no
 # column dropped reproduce the moments s_t^T H^n s_u for n = 0 .. 2d - 1, so
-# 3 blocks give six moments.
-# 3 is the upper end of the depths 2 to 3 of the prototype of the scalable
-# method 'sa_remainder', which runs one short block Lanczos per root.
-DOWNFOLDING_DELTA_LANCZOS_DEPTH = 3
+# 5 blocks give ten moments.
+# The depth of the scalable method 'sa_remainder', which runs one short
+# block Lanczos per state and side. The prototype used 2 to 3; at 3 the
+# correction of a strongly coupled state (water/6-31G NO CAS(4,4)) was
+# 7.2e-5 Ha from its full-depth value, at 5 1.2e-7 Ha, for about 20% more
+# wall time of a solve on N2/6-31G and benzene/cc-pVDZ NO CAS(6,6).
+DOWNFOLDING_DELTA_LANCZOS_DEPTH = 5
 # Block Lanczos takes a start vector whose norm is below this as zero, and
 # drops a column of the QR factorization (with column pivoting) of a block
 # whose diagonal entry |R_jj| is below this. An absolute bound: on the start
@@ -451,6 +454,16 @@ DOWNFOLDING_DELTA_LANCZOS_DEPTH = 3
 # and far below the smallest spin-orbital occupation or hole of the
 # water/6-31G NO CAS(4,4) ground state, 2.7e-4.
 DOWNFOLDING_DELTA_RANK_TOL = 1e-8
+# The remainder method 'sa_remainder' flags a state whose correction
+# |dE_K| = |r_K / (1 - r'_K)| exceeds this, Hartree ('delta_remainder_large').
+# The correction is first order in Delta - D_SA; when it is large, D_SA
+# was far from Delta at that state's energy and has also changed the state
+# itself, which a scalar cannot undo. 1e-2 Ha lies between the largest
+# correction of the states that meet the bar of 0.01 eV against exact
+# Loewdin (N2/6-31G and benzene/cc-pVDZ NO CAS(6,6): up to 7.0e-3 Ha) and
+# the smallest of those that miss it (water/6-31G NO CAS(4,4): from
+# 1.5e-2 Ha).
+DOWNFOLDING_DELTA_REMAINDER_WARN = 1e-2
 # The memory, in GB, the dense Delta methods ('lowdin', 'linearized') may take
 # outside a Slurm job when numerics.layout.delta_dense_gb is None; inside one
 # the default is the share of the allocation (`allocation_max_memory_mb`).

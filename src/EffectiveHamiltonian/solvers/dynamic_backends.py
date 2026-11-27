@@ -84,14 +84,19 @@ zero, and a start or Krylov direction whose part outside the directions
 kept before it has a norm below delta_rank_tol is dropped.
 
 The third method, 'sa_remainder' (`RemainderSolver`), needs no sector
-spectrum and is not dense: the states are those of h + D_SA, the static
-form of Delta built beforehand from a declared set of states, and each
-gets one scalar, the expectation value of what D_SA leaves out,
-r_K(E) = <K|Delta(E)|K> - (tr(D dm1_K) + c), from those Green's functions
-by Lanczos, as one Z-renormalized step E_K + r_K / (1 - r'_K). It is first
-order in Delta - D_SA and does not relax the states: its accuracy is that
-of D_SA near each state's energy. It flags 'delta_near_pole' and
-'delta_satellite' as the dense methods do, reports in
+spectrum and is not dense: a static Hamiltonian h + D_SA, the static form
+of Delta built beforehand from a declared set of states, solved once, plus
+a first-order dynamic correction per state, the expectation value of what
+D_SA leaves out, r_K(E) = <K|Delta(E)|K> - (tr(D dm1_K) + c), from those
+Green's functions by Lanczos, as one Z-renormalized step
+E_K + r_K / (1 - r'_K). It does not relax the states. Its limit is strong
+coupling: when Delta shifts a state by an amount comparable to the
+distance between its removal and attachment energies and the environment
+levels, D_SA overshoots and changes the states of h + D themselves, and
+the scalar cannot undo that; a correction above
+numerics.downfolding.delta_remainder_warn is flagged
+'delta_remainder_large' (DeltaRemainderWarning). It flags
+'delta_near_pole' and 'delta_satellite' as the dense methods do, reports in
 extra['lanczos_change'] the change of each correction from one Lanczos
 block less, and counts no solutions below a root (it forms no H_eff(E)),
 so `solvers.solve.solve` leaves all its roots unchecked for missing
@@ -146,6 +151,18 @@ class DeltaLinearizationWarning(RuntimeWarning):
 class DeltaNotConverged(RuntimeWarning):
     """Exact Loewdin ran out of steps (numerics.downfolding.delta_max_iter)
     before one step moved E by less than delta_conv; the last E is kept."""
+
+
+class DeltaRemainderWarning(RuntimeWarning):
+    """A state of the remainder method 'sa_remainder' whose correction
+    |dE_K| exceeds numerics.downfolding.delta_remainder_warn (flag
+    'delta_remainder_large'). The correction is first order in
+    Delta - D_SA; a large one means strong coupling: D_SA, evaluated at
+    the energies of the states without Delta, overshoots and has changed
+    the states of h + D themselves, which a per-state scalar cannot undo,
+    so the energy can be far from exact Loewdin. 'lowdin' or 'linearized'
+    gives the energy-dependent result where the active space fits their
+    memory limit."""
 
 
 class DeltaRootsCrossedWarning(RuntimeWarning):
@@ -772,11 +789,12 @@ class LinearizedLowdinSolver(EnergyDependentSolver):
 
 
 class RemainderSolver(EnergyDependentSolver):
-    """The remainder method 'sa_remainder': the static form D_SA of Delta
-    in the Hamiltonian, and one scalar per state for what it leaves out
-    (spec 6; the benzene handoff, method 8). It needs no sector spectrum,
-    only a short block Lanczos per state, and is the method for active
-    spaces beyond the dense methods' memory limit.
+    """The remainder method 'sa_remainder': a static Hamiltonian,
+    h + D_SA, solved once for all the states, plus a first-order dynamic
+    correction per state for what D_SA leaves out (spec 6; the benzene
+    handoff, method 8). It needs no sector spectrum, only a short block
+    Lanczos per state, and is the method for active spaces beyond the
+    dense methods' memory limit.
 
     What it computes. d_sa = (D, c), refused (ValueError) when None, is the
     static form of Delta built beforehand from a declared set of states
@@ -809,17 +827,33 @@ class RemainderSolver(EnergyDependentSolver):
     changed: Delta - D_SA enters as one first-order (Z-renormalized)
     energy shift per state, a Newton step from E_K, and the relaxation of
     the state is the part D_SA already holds. It is not exact Loewdin: how
-    close it comes depends on how well D_SA represents Delta near each
+    close it comes depends on how well D_SA represents Delta at each
     state's energy, so on the states D_SA was built from (prepare_delta
     should declare the states that are solved, and a state far from that
-    set is described worse). D_SA averages over the declared states, so a
-    declared state whose removal or attachment energies lie close to an
-    environment level (a strongly coupled state, Z well below 1) gives a
-    large D that changes the states of h + D for every state of the set,
-    and a first-order correction cannot undo that: there the method can
-    be far from 'lowdin', and the static states can even be other states
-    than Loewdin's. Check such cases against 'lowdin' on an active space
-    the dense methods can hold. Every root is reported with converged True
+    set is described worse).
+
+    Its limit: strong coupling. The correction is first order in
+    Delta - D_SA, which is accurate while the shift Delta gives a state is
+    small against the distance between the state's removal and attachment
+    energies and the environment levels lam, the denominators of Delta.
+    Then D_SA is close to Delta at each state's energy, the states of
+    h + D are close to the exact ones, and the correction is small. When
+    the shift is comparable to that distance (strong coupling), D_SA,
+    evaluated at the removal and attachment energies of the states without
+    Delta and averaged over the declared states, overshoots: it is large
+    for every state of the set and changes the states of h + D themselves,
+    their character and even their order, so that a static state can be
+    another state than the one exact Loewdin finds. A per-state scalar
+    cannot undo a change of the state, and the energy can then be far from
+    'lowdin'. This is not the case of a root next to a pole
+    ('delta_near_pole'): no denominator needs to be small. The sign of it
+    in the dense methods is a Z well below 1 on the declared states; the
+    sign of it here is a large correction, and a state whose |dE_K|
+    exceeds numerics.downfolding.delta_remainder_warn is flagged
+    'delta_remainder_large' (DeltaRemainderWarning): for it use 'lowdin'
+    or 'linearized' where the active space fits their memory limit.
+
+    What it reports. Every root is reported with converged True
     (nothing iterates), Z, and the smallest denominator |E - p_m -+ lam|
     over the Lanczos poles whose weight (b^T w)^2 exceeds
     delta_weight_floor at the refined energy. Below
@@ -928,6 +962,17 @@ class RemainderSolver(EnergyDependentSolver):
                  f'has Z = {z[k]:.3f}, below {QP_WINDOW_Z_MIN}: it is mostly '
                  f'environment, a satellite, not a state of the active space'
                  + _STATIC_INDEX, DeltaNearPoleWarning)
+        for k in np.flatnonzero(np.abs(shift) > settings.delta_remainder_warn):
+            flag('delta_remainder_large',
+                 f'Delta (sa_remainder): static state {k} at {out_e[k]:.8f} '
+                 f'has a correction |dE| = {abs(shift[k]):.2e} Ha, above '
+                 f'delta_remainder_warn = {settings.delta_remainder_warn} '
+                 f'Ha: the coupling is strong there, D_SA has changed the '
+                 f'state itself, and the first-order correction may be far '
+                 f"from exact Loewdin; 'lowdin' or 'linearized' gives the "
+                 f'energy-dependent result where the active space fits '
+                 f'their memory limit' + _STATIC_INDEX,
+                 DeltaRemainderWarning)
         return DeltaResult(out_e, static, z, smallest,
                            [v.reshape(s) for v, s in zip(flat, shapes)],
                            np.ones(n, dtype=bool),

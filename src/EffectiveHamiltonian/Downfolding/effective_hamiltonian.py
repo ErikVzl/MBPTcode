@@ -304,24 +304,30 @@ class DownfoldedHamiltonian:
         - 'static_sa': D_SA (`state_averaged_delta`), built beforehand by
           `prepare_delta` and refused (ValueError) without it; any solver.
         - 'sa_remainder': the remainder method (RemainderSolver), the one
-          for active spaces beyond the memory limit of the dense methods.
-          It needs D_SA, built beforehand by `prepare_delta` (ValueError
-          naming prepare_delta without it), from the states that will be
-          solved: D_SA is in the static Hamiltonian, and each state K of
-          h + D, at its energy E_K (eigenvalue plus c), gets one scalar
-          correction, the expectation value of what D_SA leaves out,
+          for active spaces beyond the memory limit of the dense methods:
+          a static Hamiltonian h + D_SA, solved once, plus a first-order
+          dynamic correction per state. It needs D_SA, built beforehand by
+          `prepare_delta` (ValueError naming prepare_delta without it), from
+          the states that will be solved. Each state K of h + D, at its
+          energy E_K (eigenvalue plus c), gets one scalar correction, the
+          expectation value of what D_SA leaves out,
           r_K = <K|Delta(E_K)|K> - (tr(D dm1_K) + c), Z-renormalized:
           E_K + r_K / (1 - r'_K). Delta is taken from the removal and
           attachment Green's functions of K by block Lanczos, at
-          numerics.downfolding.delta_lanczos_depth blocks. The state vector
-          is that of h + D and is not relaxed further, so it is first order
-          in Delta - D_SA: close to 'lowdin' where D_SA represents Delta
-          well at each state's energy (weak coupling, Z near 1), and not
-          where it does not, for instance when a declared state lies close
-          to a pole of Delta, which distorts D_SA for every state; compare
-          with 'lowdin' on a smaller active space. out['lanczos_change']
-          reports the change of each correction from one Lanczos block
-          less.
+          numerics.downfolding.delta_lanczos_depth blocks;
+          out['lanczos_change'] reports the change of each correction from
+          one Lanczos block less. The state vector is that of h + D and is
+          not relaxed further. Its limit is strong coupling: when Delta
+          shifts a state by an amount comparable to the distance between
+          the states' removal and attachment energies and the environment
+          levels, D_SA, evaluated at the energies without Delta and
+          averaged over the declared states, overshoots and changes the
+          states of h + D themselves (even their order), which a per-state
+          scalar cannot undo, and the energy can be far from 'lowdin'. The
+          dense methods show it as a Z well below 1; here a correction
+          |dE_K| above numerics.downfolding.delta_remainder_warn is flagged
+          'delta_remainder_large' (DeltaRemainderWarning): use 'lowdin' or
+          'linearized' for such states where the active space fits.
         - False: no Delta, with DeltaOffWarning and the flag 'delta_off'
           when the record has a coupling.
 

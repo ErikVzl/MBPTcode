@@ -5,7 +5,8 @@ an unrestricted reference), the brute-force checks of their residual
 screening (`brute_force_vt`) and residual polarizability (`brute_force_pr`),
 and the dense oracle of the RPA correlation energy of a hybridized active
 space (`dense_drpa_ec`), N2 (`nitrogen`), whose pi and pi* orbitals give
-degenerate states, and the explicit P + Q matrix of the Delta solvers
+degenerate states, benzene and its pi NO CAS(6,6) (`benzene`,
+`benzene_pi_space`), and the explicit P + Q matrix of the Delta solvers
 (`pq_spectrum`)."""
 import math
 
@@ -164,6 +165,41 @@ def nitrogen():
     mf.conv_tol = 1e-11
     mf.verbose = 0
     return mf.run()
+
+
+def benzene():
+    """Benzene/cc-pVDZ, D6h with r(CC) = 1.397 and r(CH) = 1.084 Angstrom in
+    the xy plane, RHF with density fitting (pyscf's default auxiliary
+    basis): the molecule of the benzene handoff, whose pi system gives an
+    NO CAS(6,6) with degenerate states (`benzene_pi_space`)."""
+    atoms = []
+    for k in range(6):
+        a = math.pi / 3 * k
+        atoms.append(('C', (1.397 * math.cos(a), 1.397 * math.sin(a), 0.0)))
+        r = 1.397 + 1.084
+        atoms.append(('H', (r * math.cos(a), r * math.sin(a), 0.0)))
+    mol = gto.M(atom=atoms, basis='cc-pvdz', verbose=0)
+    mf = scf.RHF(mol).density_fit()
+    mf.conv_tol = 1e-11
+    mf.verbose = 0
+    return mf.run()
+
+
+def benzene_pi_space(low, rotate_occupied=False):
+    """The NO CAS(6,6) of the pi system of benzene (`benzene`): the three
+    occupied orbitals of the basis with a weight above 0.9 on the pz, dxz
+    and dyz functions (with rotate_occupied, occupied NOs) and the three
+    virtual NOs of largest occupation, which are the pi* ones."""
+    basis = natural_orbital_basis(low, rotate_occupied=rotate_occupied)
+    mf, nocc = low.mf, basis.nocc
+    s = mf.mol.intor('int1e_ovlp')
+    pz = np.array([('pz' in lab) or ('dxz' in lab) or ('dyz' in lab)
+                   for lab in mf.mol.ao_labels()])
+    c = mf.mo_coeff @ basis.rotation
+    weight = np.einsum('pi,pi->i', c[pz], (s @ c)[pz])
+    occ_pi = [i for i in range(nocc) if weight[i] > 0.9]
+    return ActiveSpace.from_indices(len(basis.occupations), nocc, occ_pi,
+                                    range(nocc, nocc + 3), basis=basis)
 
 
 #: the pyscf operator that takes an electron of spin sigma out (particle
