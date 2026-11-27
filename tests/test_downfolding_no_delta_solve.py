@@ -497,18 +497,21 @@ PINNED = {
     (3, 2): ['-0x1.2f0c56752a470p+6', '-0x1.2ec6b15e9648ep+6',
              '-0x1.2ea9937fe0a8bp+6'],
 }
+#: absolute tolerance, Ha: bit for bit is the job of the bitwise check on
+#: one machine; another BLAS build moves the last digits (commit 91edcca)
+PIN_TOL = 1e-10
 PINNED_HUBBARD = ['-0x1.2a09e667f3bbap+1', '-0x1.17c9cea19249ep+1',
                   '-0x1.7ffffffffffccp+0']
 
 
-def test_solve_without_sides_is_bit_for_bit(canonical):
-    """Exact comparison (==) with energies computed by the code before
+def test_solve_without_sides_matches_the_pre_task_9_energies(canonical):
+    """Comparison (to PIN_TOL) with energies computed by the code before
     Task 9, where `static_states` did not exist: test_static_states_are_
     today_s_solve compares `solve` with a function `solve` now calls."""
     for (nroots, spin), want in PINNED.items():
         e = solve('pyscf_fci', canonical.g_eff, 4, 4, spin_free=True,
                   nroots=nroots, spin=spin)
-        assert all(a == float.fromhex(b) for a, b in zip(e, want)), (
+        assert all(abs(a - float.fromhex(b)) < PIN_TOL for a, b in zip(e, want)), (
             nroots, spin)
         assert len(e) == len(want)
     t = np.zeros((4, 4))
@@ -520,7 +523,8 @@ def test_solve_without_sides_is_bit_for_bit(canonical):
     e = solve('pyscf_fci', {0: 0.5, 1: t, 2: v}, 4, 4, spin_free=True,
               nroots=3)
     assert len(e) == 3
-    assert all(a == float.fromhex(b) for a, b in zip(e, PINNED_HUBBARD))
+    assert all(abs(a - float.fromhex(b)) < PIN_TOL
+               for a, b in zip(e, PINNED_HUBBARD))
 
 
 def test_spin_square_from_the_sector_operations():
