@@ -13,11 +13,12 @@ method ('delta_near_pole', for linearized also at its linearization point,
 'delta_satellite'), a root exactly on a pole stays finite; no active virtual
 means no Delta. N2/6-31G on an NO CAS(6,6): linearized follows Loewdin, the
 two partners of a degenerate state come out with one energy and as two
-different states, and the memory estimate bounds the tracemalloc peak. The kernel `delta_roots` on
-a model with two spin channels and both kinds of side; the pairing of the
-columns of b with their levels against the Fock blocks on PBE; the capability
-markers, the refusal of an engine without sector operations and of a solve
-above the memory limit, and the default limit."""
+different states, and the memory estimate bounds the tracemalloc
+peak. The kernel `delta_roots` on a model with two spin channels and both
+kinds of side; the pairing of the columns of b with their levels against the
+Fock blocks on PBE; the capability markers, the refusal of an engine without
+sector operations and of a solve above the memory limit, and the default
+limit."""
 import ast
 import math
 import pathlib
@@ -370,6 +371,19 @@ def test_no_active_virtual_means_no_delta(low):
         assert np.all(np.isinf(res.min_denominator))
 
 
+def test_no_sector_linearized_reports_zero_error_at_the_static_energy(low):
+    h = build_effective_hamiltonian(low, no_space(low, 2, 0),
+                                    screening='crpa')
+    h1, eri = _integrals(h)
+    engine = PyscfFCISolver()
+    E, V = engine.roots(h1, eri, 2, (2, 2), nroots=1, spin=None)
+    res = DYNAMIC_METHODS['linearized'](engine, h.hybridization.sides()
+                                        ).refine(h1, eri, 2, (2, 2), E, V)
+    assert np.array_equal(res.extra['linearization_error'],
+                          np.zeros(len(E)))
+    assert np.array_equal(res.extra['linearization_point'], E)
+
+
 def test_columns_of_b_pair_with_their_levels():
     """Sum_e b_te b_ue / (w - lam_e) from `Coupling.sides()` is
     F_s(A_v, E_v) (w - F(E_v, E_v))^-1 F_s(E_v, A_v) on a PBE reference,
@@ -591,5 +605,8 @@ def test_the_settings_are_validated():
                 {'delta_linearization_warn': 0.0}):
         with pytest.raises(ValueError):
             Numerics(downfolding=bad)
+    # the guard of the zero denominator must stay below the pole flag
+    with pytest.raises(ValueError, match='delta_conv.*delta_pole_warn'):
+        Numerics(downfolding={'delta_conv': 1e-3, 'delta_pole_warn': 1e-3})
     with pytest.raises(ValueError):
         Numerics(layout={'delta_dense_gb': 0.0})

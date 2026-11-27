@@ -48,17 +48,18 @@ is refused and names 'sa_remainder'):
 
 Each root reports its static energy, Z = 1 / (1 - <c|dH_eff(E)|c>) and the
 smallest denominator |E - E_M -+ lam| over the poles it sees (weight
-above delta_weight_floor). Three verdicts flag a root, whatever the method:
-a denominator below numerics.downfolding.delta_pole_warn, or for
-'linearized' a linearization point E0 that close to a pole of the states
-handed in (DeltaNearPoleWarning, 'delta_near_pole': the energy moves fast
-with E there); Z below QP_WINDOW_Z_MIN (DeltaNearPoleWarning,
-'delta_satellite': the root is mostly environment, not a state of the
-active space); and the linearization error above (linearized only). A
-denominator smaller than delta_conv is evaluated at that size, so a root on
-a pole is finite, never inf or NaN. The algebra is the kernel `delta_roots`, on dense
-arrays only, which knows neither the engine nor the spin structure of the
-integrals: it is tested with two spin channels and both kinds of side on a
+above delta_weight_floor). Two verdicts flag a root for both methods: a
+denominator below numerics.downfolding.delta_pole_warn (DeltaNearPoleWarning,
+'delta_near_pole': the energy moves fast with E there), and Z below
+QP_WINDOW_Z_MIN (DeltaNearPoleWarning, 'delta_satellite': the root is mostly
+environment, not a state of the active space). Two more apply to 'linearized'
+only: a linearization point E0 within delta_pole_warn of a pole of the states
+handed in (also 'delta_near_pole'), and a linearization error above
+numerics.downfolding.delta_linearization_warn (DeltaLinearizationWarning,
+'delta_linearization'). A denominator smaller than delta_conv is evaluated at
+that size, so a root on a pole is finite, never inf or NaN. The algebra is
+the kernel `delta_roots`, on dense arrays only, which knows neither the
+engine nor the spin structure of the integrals: it is tested with two spin channels and both kinds of side on a
 model.
 """
 import math
@@ -279,9 +280,14 @@ def delta_roots(h_n, sectors, energies, vectors, method, numerics):
         raise ValueError(f'{len(static)} energies and {len(flat)} vectors')
     n = len(static)
     if not sectors:
+        # nothing is folded: the linearization error is zero and the point
+        # is the static energy
+        extra = ({'linearization_error': np.zeros(n),
+                  'linearization_point': static.copy()}
+                 if method == 'linearized' else {})
         return DeltaResult(static.copy(), static, np.ones(n), np.full(n, np.inf),
                            [v.reshape(s) for v, s in zip(flat, shapes)],
-                           np.ones(n, dtype=bool))
+                           np.ones(n, dtype=bool), extra)
     sectors = [_Sector(*s, settings.delta_conv) for s in sectors]
     h_n = np.asarray(h_n, dtype=float)
     solve = _lowdin if method == 'lowdin' else _linearized

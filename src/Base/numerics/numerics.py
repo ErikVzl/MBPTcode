@@ -572,17 +572,18 @@ class DownfoldingNumerics:
     delta_linearization_warn, Hartree, linearized Loewdin flags a root whose
     estimated linearization error Z |<c|H_eff(E)|c> - E| is above this
     (DeltaLinearizationWarning; default DOWNFOLDING_DELTA_LINEARIZATION_WARN,
-    1 mEh: below chemical accuracy, 1.6 mEh, so a flagged root is wrong at
-    the level a chemist reads, and well above the error linearization makes
-    on a weakly coupled state, Z close to 1, which is second order in the
-    coupling). delta_conv is also the smallest denominator Delta resolves: a
+    1 mEh: below chemical accuracy, 1.6 mEh, so the flag fires before the
+    error reaches chemical accuracy, and it is well above the error
+    linearization makes on a weakly coupled state, Z close to 1, which is
+    second order in the coupling). delta_conv is also the smallest denominator Delta resolves: a
     root closer to a pole is evaluated at that distance, finite. Their
     memory limit is layout.delta_dense_gb.
 
     Refused when built: srg_s that is not a finite positive number or None,
     a negative pole_margin, continuation_margin, no_cut_warn,
     delta_pole_warn, delta_weight_floor or delta_degenerate, a delta_conv
-    or delta_linearization_warn that is not positive, and a delta_max_iter
+    or delta_linearization_warn that is not positive, a delta_conv that is not
+    below delta_pole_warn, and a delta_max_iter
     that is not a positive integer."""
     srg_s: Optional[float] = DOWNFOLDING_SRG_S
     pole_margin: float = DOWNFOLDING_POLE_MARGIN
@@ -616,6 +617,12 @@ class DownfoldingNumerics:
         if not (math.isfinite(self.delta_conv) and self.delta_conv > 0):
             raise ValueError(f'delta_conv={self.delta_conv!r}: a positive '
                              'energy step, Hartree')
+        if not self.delta_conv < self.delta_pole_warn:
+            raise ValueError(f'delta_conv={self.delta_conv!r} must be below '
+                             f'delta_pole_warn={self.delta_pole_warn!r}: the '
+                             'guard of a zero denominator works at the '
+                             'resolution delta_conv, so denominators between '
+                             'the two would be altered without a flag')
         if (isinstance(self.delta_max_iter, bool)
                 or not isinstance(self.delta_max_iter, Integral)
                 or self.delta_max_iter < 1):
