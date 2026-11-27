@@ -151,14 +151,16 @@ def weak():
         _close_chkfile(low.mf)
 
 
-def _compare(h, hs, requests, label):
+def _compare(h, hs, requests, label, messages=None):
     """'sa_remainder' (record hs, with D_SA) against 'lowdin' (record h)
     over the requests: (rows, flagged, names), rows {(spin, k): (total
     sa_remainder, total lowdin, |dE_K|)} and flagged the (spin, k) that
     'delta_remainder_large' names, per request through
     out['static_index'], and names those of every flag 'sa_remainder'
-    raised. Printed per state: |dE|, the total and the
-    excitation difference (from the first request's lowest state)."""
+    raised. messages, a list, receives (message, |dE| of the root it
+    names) for every 'delta_remainder_large'. Printed per state: |dE|, the
+    total and the excitation difference (from the first request's lowest
+    state)."""
     rows, flagged, names = {}, set(), set()
     for n, spin in requests:
         out, flags = {}, []
@@ -174,6 +176,11 @@ def _compare(h, hs, requests, label):
         flagged.update((spin, returned[int(
             f['message'].split('static state ')[1].split()[0])])
             for f in flags if f['flag'] == 'delta_remainder_large')
+        if messages is not None:
+            messages.extend(
+                (f['message'], abs(float(out['correction'][returned[int(
+                    f['message'].split('static state ')[1].split()[0])]])))
+                for f in flags if f['flag'] == 'delta_remainder_large')
         for k in range(len(got)):
             rows[spin, k] = (float(got[k]), float(want[k]),
                              abs(float(out['correction'][k])))
@@ -263,8 +270,9 @@ def test_total_energy_with_the_hole_side(weak):
 def test_strong_coupling_is_flagged(records, case):
     """Water NO CAS(4,4), D_SA of STATES: coupled strongly, and
     sa_remainder misses the bar. 'delta_remainder_large' names exactly the
-    states whose |dE_K| exceeds delta_remainder_warn, and every state that
-    misses the bar on its total is among them.
+    states whose |dE_K| exceeds delta_remainder_warn, every state that
+    misses the bar on its total is among them, and each message names the
+    |dE| of its state and the threshold.
 
     Measured (2026-11-27), per case |dE_K| (singlets 0, 1, 2; triplets 0,
     1) and sa_remainder - lowdin on the totals, all flagged:
@@ -279,13 +287,20 @@ def test_strong_coupling_is_flagged(records, case):
     next to a pole ('delta_near_pole' does not fire)."""
     hs = records[case]
     threshold = hs.numerics.downfolding.delta_remainder_warn
-    rows, flagged, names = _compare(hs, hs, STATES, f'water {case}')
+    messages = []
+    rows, flagged, names = _compare(hs, hs, STATES, f'water {case}',
+                                    messages)
     large = {key for key, (_, _, de) in rows.items() if de > threshold}
     missed = {key for key, (got, want, _) in rows.items()
               if abs(got - want) > BAR}
     assert flagged == large
     assert missed and missed <= flagged
     assert 'delta_near_pole' not in names
+    # each message names the |dE| of its state and the threshold
+    assert len(messages) == len(flagged)
+    for message, de in messages:
+        assert f'|dE| = {de:.2e} Ha' in message
+        assert f'delta_remainder_warn = {threshold} Ha' in message
 
 
 # ------------------------------------------------------- the Lanczos part

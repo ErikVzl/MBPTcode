@@ -456,9 +456,10 @@ DOWNFOLDING_DELTA_LANCZOS_DEPTH = 5
 DOWNFOLDING_DELTA_RANK_TOL = 1e-8
 # The remainder method 'sa_remainder' flags a state whose correction
 # |dE_K| = |r_K / (1 - r'_K)| exceeds this, Hartree ('delta_remainder_large').
-# The correction is first order in Delta - D_SA; when it is large, D_SA
-# was far from Delta at that state's energy and has also changed the state
-# itself, which a scalar cannot undo. 1e-2 Ha lies between the largest
+# The correction is first order in Delta - D_SA; a large one indicates that
+# D_SA was far from Delta at that state's energy and may also have changed
+# the state itself, which a scalar cannot undo. A heuristic threshold, not
+# a proof that a flagged energy is wrong. 1e-2 Ha lies between the largest
 # correction of the states that meet the bar of 0.01 eV against exact
 # Loewdin (N2/6-31G and benzene/cc-pVDZ NO CAS(6,6): up to 7.0e-3 Ha) and
 # the smallest of those that miss it (water/6-31G NO CAS(4,4): from

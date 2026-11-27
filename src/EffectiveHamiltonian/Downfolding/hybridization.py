@@ -88,7 +88,11 @@ class StaticDeltaWarning(UserWarning):
     orbital energies of the active orbitals, instead of at the energy of
     each state. It is far from exact Loewdin, and further as the basis
     grows (the message gives the benzene benchmark of the handoff), so it
-    warns on every use, with the flag 'delta_static_mf'."""
+    warns on every use, with the flag 'delta_static_mf'. Its hole side
+    (a rotated occupied block) is less trustworthy still than its particle
+    side (spec 6): evaluated at the mean-field energies of the active
+    occupied orbitals, it has poles at the occupied levels lam_occupied,
+    where such an energy meets one of them."""
 
 
 @dataclass(frozen=True)

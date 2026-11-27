@@ -618,10 +618,11 @@ class DownfoldingNumerics:
     correction |dE_K| exceeds this ('delta_remainder_large',
     DeltaRemainderWarning; default DOWNFOLDING_DELTA_REMAINDER_WARN,
     1e-2). The correction is first order in Delta - D_SA; a large one
-    says that D_SA, evaluated at energies without Delta, was far from
-    Delta at that state and has changed the state itself, which the
+    indicates that D_SA, evaluated at energies without Delta, was far from
+    Delta at that state and may have changed the state itself, which the
     correction cannot undo: the coupling is strong there, and 'lowdin' or
-    'linearized' gives the energy-dependent result where it fits.
+    'linearized' gives the energy-dependent result where it fits. The
+    threshold is a heuristic, not a proof that a flagged energy is wrong.
 
     Refused when built: srg_s that is not a finite positive number or None,
     a negative pole_margin, continuation_margin, no_cut_warn,

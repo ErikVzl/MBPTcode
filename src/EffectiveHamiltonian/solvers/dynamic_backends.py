@@ -94,8 +94,8 @@ coupling: when Delta shifts a state by an amount comparable to the
 distance between its removal and attachment energies and the environment
 levels, D_SA overshoots and changes the states of h + D themselves, and
 the scalar cannot undo that; a correction above
-numerics.downfolding.delta_remainder_warn is flagged
-'delta_remainder_large' (DeltaRemainderWarning). It flags
+numerics.downfolding.delta_remainder_warn, a heuristic sign of that regime,
+is flagged 'delta_remainder_large' (DeltaRemainderWarning). It flags
 'delta_near_pole' and 'delta_satellite' as the dense methods do, reports in
 extra['lanczos_change'] the change of each correction from one Lanczos
 block less, and counts no solutions below a root (it forms no H_eff(E)),
@@ -157,12 +157,14 @@ class DeltaRemainderWarning(RuntimeWarning):
     """A state of the remainder method 'sa_remainder' whose correction
     |dE_K| exceeds numerics.downfolding.delta_remainder_warn (flag
     'delta_remainder_large'). The correction is first order in
-    Delta - D_SA; a large one means strong coupling: D_SA, evaluated at
-    the energies of the states without Delta, overshoots and has changed
-    the states of h + D themselves, which a per-state scalar cannot undo,
-    so the energy can be far from exact Loewdin. 'lowdin' or 'linearized'
-    gives the energy-dependent result where the active space fits their
-    memory limit."""
+    Delta - D_SA, and a large one indicates strong coupling, where D_SA,
+    evaluated at the energies of the states without Delta, can overshoot
+    and change the states of h + D themselves, which a per-state scalar
+    cannot undo, so that the energy can be far from exact Loewdin. The
+    threshold is a heuristic: a flagged state is not proven wrong, nor an
+    unflagged one right. 'lowdin' or 'linearized' gives the
+    energy-dependent result where the active space fits their memory
+    limit."""
 
 
 class DeltaRootsCrossedWarning(RuntimeWarning):
@@ -850,8 +852,12 @@ class RemainderSolver(EnergyDependentSolver):
     in the dense methods is a Z well below 1 on the declared states; the
     sign of it here is a large correction, and a state whose |dE_K|
     exceeds numerics.downfolding.delta_remainder_warn is flagged
-    'delta_remainder_large' (DeltaRemainderWarning): for it use 'lowdin'
-    or 'linearized' where the active space fits their memory limit.
+    'delta_remainder_large' (DeltaRemainderWarning). The threshold is a
+    heuristic, set between the corrections of states that met the bar
+    and those that missed it on three molecules: a flag indicates this
+    regime and does not prove the energy wrong. For a flagged state use
+    'lowdin' or 'linearized' where the active space fits their memory
+    limit.
 
     What it reports. Every root is reported with converged True
     (nothing iterates), Z, and the smallest denominator |E - p_m -+ lam|
@@ -967,9 +973,11 @@ class RemainderSolver(EnergyDependentSolver):
                  f'Delta (sa_remainder): static state {k} at {out_e[k]:.8f} '
                  f'has a correction |dE| = {abs(shift[k]):.2e} Ha, above '
                  f'delta_remainder_warn = {settings.delta_remainder_warn} '
-                 f'Ha: the coupling is strong there, D_SA has changed the '
-                 f'state itself, and the first-order correction may be far '
-                 f"from exact Loewdin; 'lowdin' or 'linearized' gives the "
+                 f'Ha: a correction this large indicates that the coupling '
+                 f'is strong there and that D_SA may have changed the state '
+                 f'itself, so the first-order correction may be far from '
+                 f'exact Loewdin (the threshold is a heuristic, not a '
+                 f"proof); 'lowdin' or 'linearized' gives the "
                  f'energy-dependent result where the active space fits '
                  f'their memory limit' + _STATIC_INDEX,
                  DeltaRemainderWarning)

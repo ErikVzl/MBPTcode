@@ -90,6 +90,16 @@ class Energies:
     With Delta off (no coupling: canonical orbitals, delta=False), and for
     method 'hf', e_c_hybridization is 0.0 and e0, e0_without_delta and
     g_eff[0] are one number, to the bit.
+
+    Neither constant is a total. A total energy comes from h.solve(...),
+    which adds the constant of the model whose active energy it computed
+    and reports both parts, out['e0'] (the constant added) and
+    out['e_active'] (the active energy E^A of each root); E^A is
+    out['e_active'], not a total minus a constant chosen by hand. A solver
+    outside `solve` takes h.static_hamiltonian(method), a dict in the layout
+    of g_eff whose constant matches its one-body part. These two constants
+    are for reporting E_0; e0 is that of the default solve of a record with
+    a coupling.
     """
     e_nuc: float
     e_core: float

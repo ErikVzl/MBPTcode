@@ -19,8 +19,14 @@ its formula, `removal_moment` against the (N-1)-electron sector,
 
 Water/6-31G RHF on the NO CAS(4,4) of Task 8, whose excited states are
 coupled strongly enough to cross; N2/6-31G on an NO CAS(6,6), coupled
-weakly, where nothing crosses."""
+weakly, where nothing crosses. `prepare_delta` with solver='dmrg' is
+checked by tests/dmrg_prepare_delta_check.py in its own interpreter
+(block2 must be imported before numpy), which `test_dmrg_prepare_delta`
+runs, and skips without block2."""
 import math
+import os
+import subprocess
+import sys
 import warnings
 from dataclasses import replace
 
@@ -778,3 +784,24 @@ def test_delta_occupation_floor_is_a_setting():
     for bad in (0.0, -1e-6, float('nan'), float('inf')):
         with pytest.raises(ValueError, match='delta_occupation_floor'):
             Numerics(downfolding={'delta_occupation_floor': bad})
+
+
+# ------------------------------------------------------- D_SA built by DMRG
+def test_dmrg_prepare_delta():
+    """prepare_delta(solver='dmrg') against solver='pyscf_fci', with
+    'static_sa' (tests/dmrg_prepare_delta_check.py: D_SA and the static
+    energies within 1e-6 Ha on water/6-31G NO CAS(4,4), both blocks
+    rotated). The script runs in its own interpreter, since block2 must be
+    imported before numpy; skipped when block2 is not installed."""
+    probe = subprocess.run([sys.executable, '-c', 'import block2'],
+                           capture_output=True)
+    if probe.returncode != 0:
+        pytest.skip('block2 is not installed: the DMRG path of '
+                    'prepare_delta is not checked here')
+    script = os.path.join(os.path.dirname(__file__),
+                          'dmrg_prepare_delta_check.py')
+    result = subprocess.run([sys.executable, script], capture_output=True,
+                            text=True)
+    assert result.returncode == 0 and (
+        'DMRG PREPARE_DELTA VERIFIED' in result.stdout), (
+        result.stdout[-4000:] + result.stderr[-4000:])

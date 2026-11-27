@@ -223,7 +223,9 @@ class DownfoldedHamiltonian:
         environment is g_eff together with the coupling, and its constant
         is energies.e0 (`g_eff_is_static_part`). A total energy then comes
         from `solve`, which pairs each active energy with the constant of
-        its own model; a Hamiltonian for a solver outside `solve` comes from
+        its own model and reports both parts, out['e0'] (the constant
+        added) and out['e_active'] (the active energy of each root); a
+        Hamiltonian for a solver outside `solve` comes from
         `static_hamiltonian`. g_eff[0] plus a solve of (h_eff, v_eff) by
         hand is the energy without Delta. Without a coupling (canonical
         orbitals, or delta=False) e0, e0_without_delta and g_eff[0] are one
@@ -283,9 +285,13 @@ class DownfoldedHamiltonian:
         | coupling, None/'linearized' or 'lowdin' | {0: e0, 1: h, 2: v} with the coupling | the static states of (h, v) refined with Delta | e0 |
         | coupling, 'sa_remainder' | {0: e0, 1: h, 2: v} with the coupling and D_SA = (D, c) | the static states of (h + D, v), their energies plus c, refined by the remainder | e0 |
 
-        e0 is energies.e0, h and v are g_eff[1] and g_eff[2], and (D, c)
-        the static form: D a one-body matrix added to h and c the constant
-        of its hole part (zero without a hole side). No path adds g_eff[0]
+        A record has a coupling exactly when `g_eff_is_static_part` is
+        True. e0 is energies.e0, e0_without_delta is
+        energies.e0_without_delta, h and v are g_eff[1] and g_eff[2], and
+        (D, c) the static form: D a one-body matrix added to h and c the
+        constant of its hole part (zero without a hole side); a solver
+        outside this method gets the same dict from `static_hamiltonian`
+        (the static forms and False). No path adds g_eff[0]
         to an energy with Delta, and none adds e0 to one without. With
         'sa_remainder' the constant c of D_SA is part of E^A: it is in the
         static energy of each state (out['static']), the remainder takes the
@@ -325,9 +331,10 @@ class DownfoldedHamiltonian:
           states of h + D themselves (even their order), which a per-state
           scalar cannot undo, and the energy can be far from 'lowdin'. The
           dense methods show it as a Z well below 1; here a correction
-          |dE_K| above numerics.downfolding.delta_remainder_warn is flagged
-          'delta_remainder_large' (DeltaRemainderWarning): use 'lowdin' or
-          'linearized' for such states where the active space fits.
+          |dE_K| above numerics.downfolding.delta_remainder_warn, a
+          heuristic sign of it, is flagged 'delta_remainder_large'
+          (DeltaRemainderWarning): use 'lowdin' or 'linearized' for such
+          states where the active space fits.
         - False: no Delta, with DeltaOffWarning and the flag 'delta_off'
           when the record has a coupling.
 
