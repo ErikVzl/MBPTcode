@@ -350,12 +350,11 @@ orbitals, `Delta` the orbital-energy differences:
 ## Natural-orbital active spaces
 
 An active space need not be a set of canonical orbitals. It can be a set of
-natural orbitals (NOs) of the RPA (GW) density of the low-level run: the
-virtual NOs of largest occupation and, optionally, the occupied NOs with the
-largest holes. An NO basis is a rotation of the canonical orbitals inside the
-virtual block (and, with `rotate_occupied=True`, inside the occupied block);
-it never mixes an occupied with a virtual orbital. Unlike canonical orbitals,
-rotated ones are coupled to the environment by the reference's own Fock
+natural orbitals (NOs) of the RPA (GW) density of the low-level run, virtual
+and occupied ones. An NO basis is a rotation of the canonical orbitals inside
+the virtual block and, by default (`rotate_occupied=True`), inside the
+occupied block; it never mixes an occupied with a virtual orbital. Unlike
+canonical orbitals, rotated ones are coupled to the environment by the reference's own Fock
 operator. Delta folds that coupling back into the active space as an
 energy-dependent one-body term, which `h.solve` applies. (In this section
 Delta is that term; the orbital-energy differences of the formulas above are
@@ -376,11 +375,11 @@ from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.EffectiveHamiltonian.orbital_basis import natural_orbital_basis
 
 low = run_low_level(mf, method='rpa', mode='casida', natural_orbitals=True)
-basis = natural_orbital_basis(low)              # rotate_occupied=False
+basis = natural_orbital_basis(low)              # rotate_occupied=True
 print(basis.table())                            # index, molden, block, occupation
 nocc, norb = basis.nocc, len(basis.occupations)
-# the highest occupied orbital and the virtual NO of largest occupation;
-# check their character before trusting the indices
+# the occupied NO with the largest hole and the virtual NO of largest
+# occupation; check their character before trusting the indices (below)
 active = ActiveSpace.from_indices(norb, nocc, [nocc - 1], [nocc], basis=basis)
 h = build_effective_hamiltonian(low, active)    # delta=True, screening='crpa'
 out = {}
@@ -393,16 +392,17 @@ route as `low.natural` (on casida from the run's own eigenvectors; also on
 imagfrequency and space-time), with the size of the occupied-virtual block,
 which NOs leave out. It works for restricted references only.
 
-`natural_orbital_basis(low, rotate_occupied=False)` returns an
+`natural_orbital_basis(low, rotate_occupied=True)` returns an
 `OrbitalBasis`: `rotation` (norb x norb; column k is orbital k in the
 canonical MOs), `occupations`, `nocc` and `source`, a fingerprint of the
 mean field's orbitals. The virtual block holds the eigenvectors of the
 virtual-virtual density, in order of descending occupation. With
-`rotate_occupied=False` the occupied block is the identity: the occupied
-orbitals stay canonical and in canonical order, and their occupations are
-the diagonal of the occupied-occupied density, unsorted. With
-`rotate_occupied=True` it holds the occupied NOs, also in order of
-descending occupation, so the orbitals with the largest holes come last.
+`rotate_occupied=True`, the default, the occupied block holds the
+eigenvectors of the occupied-occupied density, the occupied NOs, also in
+order of descending occupation, so the orbitals with the largest holes come
+last. With `rotate_occupied=False` the occupied block is the identity: the
+occupied orbitals stay canonical and in canonical order, and their
+occupations are the diagonal of the occupied-occupied density, unsorted.
 
 **Indices** are 0-based everywhere, as for canonical orbitals. The indices
 of an `ActiveSpace` with a `basis` number the orbitals of that basis, not
@@ -416,6 +416,22 @@ at the orbitals before trusting an index (`h.space['mo']` holds the rotated
 orbitals of a build, for a Molden file), and recompute and check NO indices
 read from another run. `examples/24_natural_orbital_downfolding.py` picks
 the pi orbitals of ethylene by their p_z weight.
+
+**Occupied NOs are chosen by character, not by occupation alone.**
+`basis.table()` lists the occupations; what each orbital is, its
+populations on the atoms and its symmetry, is read from the orbitals
+themselves, the columns of `mf.mo_coeff @ basis.rotation`. Where two occupied NOs have nearly equal holes, the one with the
+larger hole need not be the orbital the active space needs. N2 at 1.1 A,
+cc-pVDZ, RHF: the three occupied NOs with the largest holes are the two
+pi_u NOs and 2sigma_u (occupations 1.95948, 1.95948 and 1.97343), not the
+3sigma_g of a CASSCF(6,6) valence space, whose occupation, 1.97424,
+differs from that of 2sigma_u by 8e-4. With them in an NO CAS(6,6) (and
+the three virtual NOs of largest occupation; Delta, `'linearized'`;
+`sigma='srg'`) the total lies +5.98 mEh from the same downfolding with the
+canonical CAS(10,16) (every valence orbital and the 11 lowest canonical
+virtual orbitals active), against -1.10 mEh with 3sigma_g in place of
+2sigma_u. At 1.6 A the three largest holes are the CASSCF orbitals (a run
+of 2026-11-27 at commit 0d914e0, outside the tests).
 
 **The cut.** Two NOs whose occupations are equal (symmetry partners, such
 as a degenerate pi pair) are an arbitrary pair of vectors of one
@@ -492,19 +508,15 @@ gives are
 and the energies with Delta are the solutions of E = an eigenvalue of
 H_eff(E). Both sides enter one H_eff(E).
 
-**`rotate_occupied`.** `False`, the default, rotates the virtual orbitals
-only: the occupied ones stay canonical and there is no hole side. `True`
-rotates both blocks and folds both sides. The hole side is the smaller one
+**`rotate_occupied`.** `True`, the default, rotates both blocks and folds
+both sides. `False` rotates the virtual orbitals only: the occupied ones
+stay canonical and there is no hole side. The hole side is the smaller one
 on the cases measured: on water/6-31G (the NO CAS(4,4) of the tests) it
 moves the ground state by -0.33 mEh and the two excited states of the tests
 by -28 and -21 mEh, on N2/6-31G (NO CAS(6,6)) by -0.04 to -0.07 mEh
 (measured with the tests of `tests/test_downfolding_no_hole.py` at commit
-964df7c). Occupied NOs chosen by
-their holes alone can pick a dynamically correlated orbital: on N2 at 1.1 A
-the occupied NO with the largest hole was 2sigma_u, not the 3sigma_g of a
-CASSCF(6,6) valence space (RPA occupations 1.9806 and 1.9824; a comparison
-with CASSCF run on 2026-11-27, outside the tests); from 1.5 A on the
-occupation picked the CASSCF orbitals.
+964df7c). Which occupied NOs to make active is decided by their character
+([above](#getting-the-natural-orbitals)).
 
 ### E_0 with Delta
 
@@ -986,10 +998,11 @@ On a KS reference (PBE, PBE0, ...) the operator an electron feels at the GW
 level is F_KS + Sigma_x + Sigma_c - v_xc, and between an active orbital t
 and an environment orbital e it has three pieces: the rotation (F_KS(t,e),
 zero for canonical orbitals), the exchange part X = <t|Sigma_x - v_xc|e>
-(zero on HF) and its correlation partner <t|Sigma_c|e>. Delta folds the
-rotation only. X is treated as for canonical orbitals: kept inside the
-active block and inside the environment (both are built from the bare Fock
-operator, so their levels stay aligned) and dropped between them; the
+(zero on HF) and its correlation partner S = <t|Sigma_c|e>. Delta folds
+the coupling of the rotation only. X is treated as for canonical orbitals:
+kept inside the active block and inside the environment (both are built
+from the bare Fock operator, so their levels stay aligned) and dropped
+between them; the
 correlation part is not included anywhere. So on HF nothing is left out,
 and on a reference that is not HF the exchange part of the bare coupling
 between active and environment orbitals, and its correlation partner, are.
@@ -998,16 +1011,43 @@ norms of X between active and environment orbitals (`'av_ev'`, `'ao_i'`)
 and between occupied and virtual ones (`'ao_ev'`, `'i_av'`, `'i_ev'`); they
 are below 1e-7 on HF with exact integrals and between 3.7e-3 and 0.16 on
 PBE water/6-31G (`tests/test_downfolding_no_hybrid_reference.py`, commit
-3071e1e). The
-rotation-only form has no reference numbers on such a reference. The
-prototype's PBE numbers (benzene, aug-cc-pVTZ: a mean absolute error of 0.06
-eV on PBE against 0.12 eV on HF; butadiene 0.15 against 0.22) folded the
-bare coupling in the virtual block instead, X included, with Sigma^E on.
-Future work: the correlation part through quasiparticle energies (the same
-rotation applied to QP instead of mean-field energies, which the low-level
-run can already produce, `qp=True`; the E_0 term has to be rederived for
-it), then the bare coupling X with its occupied-virtual blocks and the
-singles energy that comes with it, and an mRPA for the coupled model.
+3071e1e). The prototype of this method folded the bare coupling in the
+virtual block instead, X included, with Sigma^E on (benzene,
+aug-cc-pVTZ: a mean absolute error of 0.06 eV on PBE against 0.12 eV on
+HF; butadiene 0.15 against 0.22).
+
+What the rotation-only form gives on such a reference, measured on two
+molecules with `sigma='srg'` (runs of 2026-11-27, outside the tests):
+
+- Benzene/cc-pVDZ, the pi NO CAS(6,6) (canonical occupied pi orbitals, the
+  three virtual NOs of largest occupation), PBE reference, the three
+  lowest singlets and four lowest triplets declared to `prepare_delta`
+  and solved: the Delta methods are as close to exact Loewdin as on HF, or
+  closer. The largest deviation of the six excitation energies from `'lowdin'` is
+  6.3e-9 eV for `'linearized'`, 2.9e-4 eV for `'sa_remainder'`, 0.066 eV
+  for `'static_sa'` and 0.24 eV for `'static_mf'`; on HF it is 3.1e-7,
+  3.2e-3, 0.12 and 0.84 eV (commit 0d914e0). This compares the methods
+  with exact Loewdin on one model; it does not measure what the left-out
+  coupling does to the energies.
+- N2/6-31G against exact frozen-core FCI (commit 3071e1e): on a PBE0
+  reference every variant lies below FCI. At 1.1 A the NO CAS(6,5) to
+  CAS(6,8), with virtual NOs or with occupied NOs as well, lie 26.4 to
+  36.0 mEh below it, with Delta and with Delta off alike, and the
+  canonical spaces of those sizes (where one does not cut a degenerate
+  pair), which have nothing to fold, 37.1 to 40.0 mEh below it; at 1.6 A
+  22.8 to 31.8 mEh (NO) and 31.1 to 39.6 mEh (canonical). On RHF the same NO spaces with Delta lie -2.1 to +7.0 mEh
+  from FCI at 1.1 A. The offset is there with Delta off and with
+  canonical orbitals, so it is a property of the static downfolding on a
+  hybrid reference, not of Delta.
+
+Future work: first decompose that offset term by term (a canonical
+CAS(6,6), HF against PBE0); only then decide which piece is folded next,
+the bare coupling X (with its occupied-virtual blocks and the singles
+energy that comes with it) or its correlation partner S (through
+quasiparticle energies: the same rotation applied to QP instead of
+mean-field energies, which the low-level run can already produce,
+`qp=True`; the E_0 term has to be rederived for it). An mRPA for the
+coupled model is also still to be built.
 
 ### Unrestricted references and rotated orbitals
 
@@ -1061,8 +1101,11 @@ is in place for them.
   above the reach of the dense methods no method follows the response of
   the wavefunction exactly.
 - Roots next to a pole, as in diffuse bases: flagged, not fixed.
-- A reference that is not HF: Delta folds the rotation only (above), with
-  no reference numbers; a documented limitation, not a flag. It is the
+- A reference that is not HF: Delta folds the coupling of the rotation
+  only (above). On N2/6-31G at 1.1 A with PBE0 the totals lie 26 to 40
+  mEh below exact FCI, with Delta on or off and with canonical orbitals,
+  an offset of the static downfolding on a hybrid reference that is not
+  yet understood; a documented limitation, not a flag. It is the
   combination the first application uses.
 
 ## Unrestricted references

@@ -41,7 +41,7 @@ def test_occupations_descend_in_each_rotated_block(low):
     full = natural_orbital_basis(low, rotate_occupied=True)
     assert np.all(np.diff(full.occupations[:nocc]) <= 0)
     assert np.all(np.diff(full.occupations[nocc:]) <= 0)
-    part = natural_orbital_basis(low)
+    part = natural_orbital_basis(low, rotate_occupied=False)
     assert np.all(np.diff(part.occupations[nocc:]) <= 0)
     assert np.array_equal(part.occupations[:nocc], np.diag(nat.gamma_oo))
     # the occupied diagonal is in canonical order, not sorted
@@ -50,14 +50,25 @@ def test_occupations_descend_in_each_rotated_block(low):
 
 def test_occupied_block_is_identity_unless_rotated(low):
     nocc = low.nocc
-    part = natural_orbital_basis(low)
+    part = natural_orbital_basis(low, rotate_occupied=False)
     assert np.array_equal(part.rotation[:nocc, :nocc], np.eye(nocc))
     full = natural_orbital_basis(low, rotate_occupied=True)
     assert not np.array_equal(full.rotation[:nocc, :nocc], np.eye(nocc))
 
 
+def test_occupied_block_is_rotated_by_default(low):
+    """rotate_occupied defaults to True: the default basis is the one with
+    both blocks rotated."""
+    default = natural_orbital_basis(low)
+    full = natural_orbital_basis(low, rotate_occupied=True)
+    assert default.rotates_occupied
+    assert default.digest == full.digest
+    assert np.array_equal(default.occupations, full.occupations)
+
+
 def test_source_and_digest(low):
-    a, b = natural_orbital_basis(low), natural_orbital_basis(low)
+    a = natural_orbital_basis(low, rotate_occupied=False)
+    b = natural_orbital_basis(low, rotate_occupied=False)
     assert a.source == b.source and a.digest == b.digest
     assert a.digest != natural_orbital_basis(low, rotate_occupied=True).digest
     assert len(a.source) == 64

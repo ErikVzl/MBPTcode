@@ -81,13 +81,25 @@ class OrbitalBasis:
         return '\n'.join(lines)
 
 
-def natural_orbital_basis(low, rotate_occupied=False):
+def natural_orbital_basis(low, rotate_occupied=True):
     """The `OrbitalBasis` of the natural orbitals of the GW density stored in
     `low.natural`: each rotated block in order of descending occupation.
 
-    With rotate_occupied=False the occupied block is the identity, so the
-    occupied orbitals stay canonical and in canonical order, and their
-    occupations are the diagonal of gamma_oo, unsorted.
+    The virtual block holds the eigenvectors of gamma_vv. With
+    rotate_occupied=True, the default, the occupied block holds the
+    eigenvectors of gamma_oo, the occupied NOs, so the orbitals with the
+    largest holes come last. With rotate_occupied=False the occupied block
+    is the identity, so the occupied orbitals stay canonical and in
+    canonical order, and their occupations are the diagonal of gamma_oo,
+    unsorted.
+
+    Occupied NOs are to be chosen by their character, not by occupation
+    alone: `OrbitalBasis.table()` lists the occupations, and what each
+    orbital is (its populations on the atoms, its symmetry) is read from
+    the orbitals, the columns of mf.mo_coeff @ rotation. Where two occupied
+    NOs have nearly equal holes, the one with the larger hole need not be
+    the orbital the active space needs (docs/methods/downfolding.md,
+    "Natural-orbital active spaces", has an example).
 
     NotImplementedError for an unrestricted run (there is no unrestricted GW
     density); ValueError when the run was made without natural_orbitals=True.

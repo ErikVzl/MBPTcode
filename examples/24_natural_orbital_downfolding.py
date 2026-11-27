@@ -8,11 +8,11 @@ Steps: the RPA run keeps the occupied-occupied and virtual-virtual blocks of
 its GW density (natural_orbitals=True); `natural_orbital_basis` turns them
 into an orbital basis, whose `table()` lists every orbital with its 0-based
 index (the one an ActiveSpace takes), its molden number (index + 1), its
-block and its occupation. The occupied orbitals stay canonical
-(rotate_occupied=False, the default); the virtual ones are NOs, in order of
-descending occupation. The CAS(2,2) is the canonical occupied pi orbital and
-the virtual NO of largest occupation that is pi, both picked by character
-(a p_z weight above 0.9).
+block and its occupation. Both blocks are rotated (rotate_occupied=True, the
+default): the occupied and the virtual orbitals are NOs, each block in order
+of descending occupation. The CAS(2,2) is the occupied NO that is pi and the
+virtual NO of largest occupation that is pi, both picked by character (a p_z
+weight above 0.9), not by occupation.
 
 The build folds the coupling by default (delta=True): `h.hybridization`
 holds it, and E_0 gains one term, e_c_hybridization. So there are two
@@ -106,7 +106,7 @@ def main():
     mf.conv_tol = 1e-10
     mf.run()
     low = run_low_level(mf, method='rpa', mode='casida', natural_orbitals=True)
-    basis = natural_orbital_basis(low)          # rotate_occupied=False
+    basis = natural_orbital_basis(low)          # rotate_occupied=True
     nocc, norb = basis.nocc, len(basis.occupations)
 
     print('ethylene/cc-pVDZ RHF, E_HF = %.8f' % mf.e_tot)
@@ -115,7 +115,7 @@ def main():
     rows = basis.table().splitlines()
     print('\n'.join([rows[0]] + rows[1 + nocc - 3:1 + nocc + 4]))
 
-    # the pi orbitals by character: the occupied canonical one, and the
+    # the pi orbitals by character: the occupied NO that is pi, and the
     # first virtual NO (the largest occupation) that is pi
     weight = pz_weight(mol, mf.mo_coeff @ basis.rotation)
     occ_pi = [k for k in range(nocc) if weight[k] > 0.9]
